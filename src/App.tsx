@@ -341,7 +341,7 @@ service cloud.firestore {
 
 // --- Sub Components ---
 
-function Dashboard({ user }: { user: User }) {
+function Dashboard({ user, onManageDetails }: { user: User, onManageDetails: () => void }) {
   const [stats, setStats] = useState({
     pending: 0,
     collectedToday: 0,
@@ -660,9 +660,7 @@ function CustomerPassbook({ user, customer, onBack, brands }: { user: User, cust
       {/* Navbar for Passbook */}
       <div className="flex items-center gap-2 mb-4">
         <button onClick={onBack} className="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-full">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
-          </svg>
+          <LogOut size={20} className="rotate-180" />
         </button>
         <h2 className="text-lg font-bold text-gray-800">{liveCustomer.name}</h2>
       </div>
@@ -677,71 +675,57 @@ function CustomerPassbook({ user, customer, onBack, brands }: { user: User, cust
           ₹ {liveCustomer.balance}
         </p>
         <p className="text-xs text-gray-400 mt-2">{liveCustomer.location} • {liveCustomer.phone}</p>
-      </div>
 
-      {/* Tabs */}
-      <div className="flex bg-gray-200 p-1 rounded-xl mb-6">
-        {(['HISTORY', 'SALE', 'PAYMENT'] as const).map(tab => (
+        <div className="mt-4 flex gap-3 justify-center">
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${activeTab === tab
-              ? 'bg-white text-gray-800 shadow-sm'
-              : 'text-gray-500 hover:text-gray-700'
-              }`}
+            onClick={() => setShowAddSale(true)}
+            className="bg-red-600 text-white px-6 py-2 rounded-full font-bold shadow-md hover:bg-red-700 active:scale-95 transition-all text-sm flex items-center gap-2"
           >
-            {tab === 'SALE' ? '+ SALE' : tab === 'PAYMENT' ? '+ PAYMENT' : 'HISTORY'}
+            <ShoppingBag size={16} /> New Sale
           </button>
-        ))}
+          <button
+            onClick={() => setShowAddMoney(true)}
+            className="bg-emerald-600 text-white px-6 py-2 rounded-full font-bold shadow-md hover:bg-emerald-700 active:scale-95 transition-all text-sm flex items-center gap-2"
+          >
+            <IndianRupee size={16} /> Get Payment
+          </button>
+        </div>
       </div>
 
-      {/* Content */}
-      <div className="animate-fade-in">
-        {activeTab === 'HISTORY' && (
-          <div className="space-y-3">
-            {transactions.length === 0 ? (
-              <div className="text-center py-10 text-gray-400">No transactions yet</div>
-            ) : (
-              transactions.map(t => (
-                <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 flex justify-between items-center">
-                  <div>
-                    <p className={`text-xs font-bold uppercase mb-1 ${t.type === 'SALE' ? 'text-red-500' : 'text-emerald-500'}`}>
-                      {t.type}
-                    </p>
-                    <p className="text-sm text-gray-600">
-                      {t.type === 'SALE'
-                        ? `${t.details?.bags} bags • ${t.details?.brand}`
-                        : t.details?.notes || 'Cash Payment'}
-                    </p>
-                    <p className="text-xs text-gray-400 mt-1">
-                      {t.date?.toDate ? t.date.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Just now'}
-                    </p>
-                  </div>
-                  <div className={`font-bold text-lg ${t.type === 'SALE' ? 'text-red-600' : 'text-emerald-600'}`}>
-                    {t.type === 'SALE' ? '+' : '-'} ₹{t.amount}
-                  </div>
+      <h3 className="text-gray-800 font-bold mb-3 text-sm uppercase tracking-wide opacity-70">Transaction History</h3>
+
+      <div className="space-y-3">
+        {transactions.length === 0 ? (
+          <p className="text-center text-gray-400 py-10">No transactions yet.</p>
+        ) : (
+          transactions.map(t => (
+            <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-start">
+              <div className="flex gap-3">
+                <div className={`mt-1 p-2 rounded-lg ${t.type === 'SALE' ? 'bg-red-50 text-red-500' : 'bg-emerald-50 text-emerald-500'}`}>
+                  {t.type === 'SALE' ? <ShoppingBag size={18} /> : <IndianRupee size={18} />}
                 </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {activeTab === 'SALE' && (
-          <TransactionForm
-            type="SALE"
-            user={user}
-            customer={liveCustomer}
-            onSuccess={() => setActiveTab('HISTORY')}
-          />
-        )}
-
-        {activeTab === 'PAYMENT' && (
-          <TransactionForm
-            type="PAYMENT"
-            user={user}
-            customer={liveCustomer}
-            onSuccess={() => setActiveTab('HISTORY')}
-          />
+                <div>
+                  <p className="font-bold text-gray-800">
+                    {t.type === 'SALE' ? 'Rice Sale' : 'Payment Received'}
+                  </p>
+                  {t.details?.brand && (
+                    <p className="text-xs text-gray-600 font-medium">
+                      {t.details.brand} • {t.details.bags} bags @ ₹{t.details.pricePerBag}
+                    </p>
+                  )}
+                  {t.details?.notes && (
+                    <p className="text-xs text-gray-500 italic mt-0.5">"{t.details.notes}"</p>
+                  )}
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    {t.date?.toDate ? t.date.toDate().toLocaleDateString('en-IN') + ' ' + t.date.toDate().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : ''}
+                  </p>
+                </div>
+              </div>
+              <p className={`font-bold ${t.type === 'SALE' ? 'text-red-600' : 'text-emerald-600'}`}>
+                {t.type === 'SALE' ? '+' : '-'} ₹{t.amount}
+              </p>
+            </div>
+          ))
         )}
       </div>
     </div>
