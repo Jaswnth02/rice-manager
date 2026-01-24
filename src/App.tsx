@@ -420,8 +420,8 @@ function Dashboard({ user }: { user: User }) {
           <p className="text-gray-400 text-xs mb-1 uppercase font-bold">Sales Today</p>
           <p className="text-xl font-black text-blue-600">₹ {stats.salesToday.toLocaleString('en-IN')}</p>
         </div>
-        </div>
       </div>
+
 
       <button
         onClick={onManageDetails}
