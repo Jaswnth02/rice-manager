@@ -31,7 +31,10 @@ import {
   doc,
   updateDoc,
   serverTimestamp,
-  getDocs
+  getDocs,
+  setDoc,
+  arrayUnion,
+  arrayRemove
 } from 'firebase/firestore';
 
 // --- Types ---
@@ -71,6 +74,21 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [permissionError, setPermissionError] = useState(false);
   const [activeCustomer, setActiveCustomer] = useState<Customer | null>(null);
+  const [showBrandManager, setShowBrandManager] = useState(false);
+  const [brands, setBrands] = useState<string[]>([]);
+
+  // Fetch Brands
+  useEffect(() => {
+    if (!user) return;
+    const unsub = onSnapshot(doc(db, `users/${user.uid}/settings/general`), (docSnap) => {
+      if (docSnap.exists() && docSnap.data().brands) {
+        setBrands(docSnap.data().brands);
+      } else {
+        setBrands(['Sona Masoori', 'Basmati', 'Ponni Rice', 'Idly Rice']);
+      }
+    });
+    return () => unsub();
+  }, [user]);
 
   // Auth Listener
   useEffect(() => {
@@ -259,9 +277,9 @@ service cloud.firestore {
   // Determine main content based on state
   let content;
   if (activeCustomer) {
-    content = <CustomerPassbook user={user} customer={activeCustomer} onBack={handleBackToCustomers} />;
+    content = <CustomerPassbook user={user} customer={activeCustomer} onBack={handleBackToCustomers} brands={brands} />;
   } else if (currentView === 'DASHBOARD') {
-    content = <Dashboard user={user} />;
+    content = <Dashboard user={user} onManageDetails={() => setShowBrandManager(true)} />;
   } else if (currentView === 'CUSTOMERS') {
     content = <CustomersView user={user} onSelectCustomer={setActiveCustomer} />;
   } else if (currentView === 'REPORTS') {
@@ -310,6 +328,10 @@ service cloud.firestore {
             <span>Reports</span>
           </button>
         </nav>
+      )}
+
+      {showBrandManager && (
+        <BrandManager user={user} onClose={() => setShowBrandManager(false)} />
       )}
     </div>
   );
@@ -398,7 +420,15 @@ function Dashboard({ user }: { user: User }) {
           <p className="text-gray-400 text-xs mb-1 uppercase font-bold">Sales Today</p>
           <p className="text-xl font-black text-blue-600">₹ {stats.salesToday.toLocaleString('en-IN')}</p>
         </div>
+        </div>
       </div>
+
+      <button
+        onClick={onManageDetails}
+        className="w-full py-3 bg-white border border-gray-200 text-gray-600 font-bold rounded-xl shadow-sm hover:bg-gray-50 flex items-center justify-center gap-2"
+      >
+        <span>Add or Modify Details</span>
+      </button>
 
       <div>
         <h3 className="text-gray-800 font-bold mb-3 text-sm uppercase tracking-wide opacity-70">Recent Activity</h3>
@@ -427,7 +457,7 @@ function Dashboard({ user }: { user: User }) {
           )}
         </div>
       </div>
-    </div>
+    </div >
   );
 }
 
@@ -540,16 +570,75 @@ function CustomersView({ user, onSelectCustomer }: { user: User, onSelectCustome
   );
 }
 
-function CustomerPassbook({ user, customer, onBack }: { user: User, customer: Customer, onBack: () => void }) {
-  const [activeTab, setActiveTab] = useState<'HISTORY' | 'SALE' | 'PAYMENT'>('HISTORY');
+function CustomerPassbook({ user, customer, onBack, brands }: { user: User, customer: Customer, onBack: () => void, brands: string[] }) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [showAddMoney, setShowAddMoney] = useState(false);
+  const [showAddSale, setShowAddSale] = useState(false);
 
-  // Real-time listener for THIS customer's balance updates
-  const [liveCustomer, setLiveCustomer] = useState(customer);
+  // ... (existing useEffect) ...
+
+  const handleTransactionSuccess = () => {
+    setShowAddMoney(false);
+    setShowAddSale(false);
+  };
+
+  if (showAddMoney) {
+    return (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-md relative">
+          <button
+            onClick={() => setShowAddMoney(false)}
+            className="absolute -top-12 right-0 text-white p-2"
+          >
+            Close
+          </button>
+          <TransactionForm
+            type="PAYMENT"
+            user={user}
+            customer={customer}
+            onSuccess={handleTransactionSuccess}
+            brands={brands}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (showAddSale) {
+    return (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-md relative">
+          <button
+            onClick={() => setShowAddSale(false)}
+            className="absolute -top-12 right-0 text-white p-2"
+          >
+            Close
+          </button>
+          <TransactionForm
+            type="SALE"
+            user={user}
+            customer={customer}
+            onSuccess={handleTransactionSuccess}
+            brands={brands}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* ... existing render ... */}
+
+      const [activeTab, setActiveTab] = useState<'HISTORY' | 'SALE' | 'PAYMENT'>('HISTORY');
+      const [transactions, setTransactions] = useState<Transaction[]>([]);
+
+      // Real-time listener for THIS customer's balance updates
+      const [liveCustomer, setLiveCustomer] = useState(customer);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, `users/${user.uid}/customers`, customer.id), (doc) => {
-      if (doc.exists()) setLiveCustomer({ id: doc.id, ...doc.data() } as Customer);
+      if (doc.exists()) setLiveCustomer({id: doc.id, ...doc.data() } as Customer);
     });
     return () => unsub();
   }, [user.uid, customer.id]);
@@ -560,124 +649,124 @@ function CustomerPassbook({ user, customer, onBack }: { user: User, customer: Cu
       collection(db, `users/${user.uid}/transactions`),
       where('customerId', '==', customer.id),
       orderBy('date', 'desc')
-    );
+      );
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[]);
+        setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[]);
     });
     return () => unsubscribe();
   }, [user.uid, customer.id]);
 
-  return (
-    <div className="pb-4">
-      {/* Navbar for Passbook */}
-      <div className="flex items-center gap-2 mb-4">
-        <button onClick={onBack} className="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-full">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
-          </svg>
-        </button>
-        <h2 className="text-lg font-bold text-gray-800">{liveCustomer.name}</h2>
-      </div>
-
-      {/* Customer Summary Card */}
-      <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 mb-6 text-center relative overflow-hidden">
-        <div className="absolute top-0 right-0 p-3 opacity-10">
-          <CreditCard size={100} className="text-emerald-500" />
-        </div>
-        <p className="text-gray-500 text-sm mb-1 uppercase tracking-wider">Current Balance</p>
-        <p className={`text-4xl font-black ${liveCustomer.balance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-          ₹ {liveCustomer.balance}
-        </p>
-        <p className="text-xs text-gray-400 mt-2">{liveCustomer.location} • {liveCustomer.phone}</p>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex bg-gray-200 p-1 rounded-xl mb-6">
-        {(['HISTORY', 'SALE', 'PAYMENT'] as const).map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${activeTab === tab
-              ? 'bg-white text-gray-800 shadow-sm'
-              : 'text-gray-500 hover:text-gray-700'
-              }`}
-          >
-            {tab === 'SALE' ? '+ SALE' : tab === 'PAYMENT' ? '+ PAYMENT' : 'HISTORY'}
+      return (
+      <div className="pb-4">
+        {/* Navbar for Passbook */}
+        <div className="flex items-center gap-2 mb-4">
+          <button onClick={onBack} className="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-full">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+            </svg>
           </button>
-        ))}
-      </div>
+          <h2 className="text-lg font-bold text-gray-800">{liveCustomer.name}</h2>
+        </div>
 
-      {/* Content */}
-      <div className="animate-fade-in">
-        {activeTab === 'HISTORY' && (
-          <div className="space-y-3">
-            {transactions.length === 0 ? (
-              <div className="text-center py-10 text-gray-400">No transactions yet</div>
-            ) : (
-              transactions.map(t => (
-                <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 flex justify-between items-center">
-                  <div>
-                    <p className={`text-xs font-bold uppercase mb-1 ${t.type === 'SALE' ? 'text-red-500' : 'text-emerald-500'}`}>
-                      {t.type}
-                    </p>
-                    <p className="text-sm text-gray-600">
-                      {t.type === 'SALE'
-                        ? `${t.details?.bags} bags • ${t.details?.brand}`
-                        : t.details?.notes || 'Cash Payment'}
-                    </p>
-                    <p className="text-xs text-gray-400 mt-1">
-                      {t.date?.toDate ? t.date.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Just now'}
-                    </p>
-                  </div>
-                  <div className={`font-bold text-lg ${t.type === 'SALE' ? 'text-red-600' : 'text-emerald-600'}`}>
-                    {t.type === 'SALE' ? '+' : '-'} ₹{t.amount}
-                  </div>
-                </div>
-              ))
-            )}
+        {/* Customer Summary Card */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 mb-6 text-center relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-3 opacity-10">
+            <CreditCard size={100} className="text-emerald-500" />
           </div>
-        )}
+          <p className="text-gray-500 text-sm mb-1 uppercase tracking-wider">Current Balance</p>
+          <p className={`text-4xl font-black ${liveCustomer.balance > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+            ₹ {liveCustomer.balance}
+          </p>
+          <p className="text-xs text-gray-400 mt-2">{liveCustomer.location} • {liveCustomer.phone}</p>
+        </div>
 
-        {activeTab === 'SALE' && (
-          <TransactionForm
-            type="SALE"
-            user={user}
-            customer={liveCustomer}
-            onSuccess={() => setActiveTab('HISTORY')}
-          />
-        )}
+        {/* Tabs */}
+        <div className="flex bg-gray-200 p-1 rounded-xl mb-6">
+          {(['HISTORY', 'SALE', 'PAYMENT'] as const).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 py-2 text-xs font-bold rounded-lg transition-all ${activeTab === tab
+                ? 'bg-white text-gray-800 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+                }`}
+            >
+              {tab === 'SALE' ? '+ SALE' : tab === 'PAYMENT' ? '+ PAYMENT' : 'HISTORY'}
+            </button>
+          ))}
+        </div>
 
-        {activeTab === 'PAYMENT' && (
-          <TransactionForm
-            type="PAYMENT"
-            user={user}
-            customer={liveCustomer}
-            onSuccess={() => setActiveTab('HISTORY')}
-          />
-        )}
+        {/* Content */}
+        <div className="animate-fade-in">
+          {activeTab === 'HISTORY' && (
+            <div className="space-y-3">
+              {transactions.length === 0 ? (
+                <div className="text-center py-10 text-gray-400">No transactions yet</div>
+              ) : (
+                transactions.map(t => (
+                  <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 flex justify-between items-center">
+                    <div>
+                      <p className={`text-xs font-bold uppercase mb-1 ${t.type === 'SALE' ? 'text-red-500' : 'text-emerald-500'}`}>
+                        {t.type}
+                      </p>
+                      <p className="text-sm text-gray-600">
+                        {t.type === 'SALE'
+                          ? `${t.details?.bags} bags • ${t.details?.brand}`
+                          : t.details?.notes || 'Cash Payment'}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {t.date?.toDate ? t.date.toDate().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Just now'}
+                      </p>
+                    </div>
+                    <div className={`font-bold text-lg ${t.type === 'SALE' ? 'text-red-600' : 'text-emerald-600'}`}>
+                      {t.type === 'SALE' ? '+' : '-'} ₹{t.amount}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {activeTab === 'SALE' && (
+            <TransactionForm
+              type="SALE"
+              user={user}
+              customer={liveCustomer}
+              onSuccess={() => setActiveTab('HISTORY')}
+            />
+          )}
+
+          {activeTab === 'PAYMENT' && (
+            <TransactionForm
+              type="PAYMENT"
+              user={user}
+              customer={liveCustomer}
+              onSuccess={() => setActiveTab('HISTORY')}
+            />
+          )}
+        </div>
       </div>
-    </div>
-  );
+      );
 }
 
-function TransactionForm({ type, user, customer, onSuccess }: { type: 'SALE' | 'PAYMENT', user: User, customer: Customer, onSuccess: () => void }) {
+      function TransactionForm({type, user, customer, onSuccess, brands}: {type: 'SALE' | 'PAYMENT', user: User, customer: Customer, onSuccess: () => void, brands: string[] }) {
   const [loading, setLoading] = useState(false);
-  const [formData, setFormData] = useState({
-    brand: 'Sona Masoori',
-    bags: 1,
-    pricePerBag: 0,
-    amount: 0, // For Payment
-    notes: '',
-    paidNow: 0 // Partial Payment for SALE
+      const [formData, setFormData] = useState({
+        brand: 'Sona Masoori',
+      bags: 1,
+      pricePerBag: 0,
+      amount: 0, // For Payment
+      notes: '',
+      paidNow: 0 // Partial Payment for SALE
   });
 
-  const totalSaleAmount = type === 'SALE' ? (formData.bags * formData.pricePerBag) : 0;
+      const totalSaleAmount = type === 'SALE' ? (formData.bags * formData.pricePerBag) : 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+        e.preventDefault();
+      setLoading(true);
 
-    try {
+      try {
       const batchPromises = [];
       const timestamp = serverTimestamp();
 
@@ -686,10 +775,10 @@ function TransactionForm({ type, user, customer, onSuccess }: { type: 'SALE' | '
 
       const mainTxData: any = {
         customerId: customer.id,
-        customerName: customer.name,
-        type: type,
-        amount: amount,
-        date: timestamp,
+      customerName: customer.name,
+      type: type,
+      amount: amount,
+      date: timestamp,
       };
 
       if (type === 'SALE') {
@@ -732,220 +821,221 @@ function TransactionForm({ type, user, customer, onSuccess }: { type: 'SALE' | '
       onSuccess();
 
     } catch (err) {
-      console.error("Transaction failed:", err);
+        console.error("Transaction failed:", err);
       alert("Transaction failed");
     } finally {
-      setLoading(false);
+        setLoading(false);
     }
   };
 
-  return (
-    <form onSubmit={handleSubmit} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
+      return (
+      <form onSubmit={handleSubmit} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 space-y-4">
 
-      {type === 'SALE' ? (
-        <>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Rice Brand</label>
-            <select
-              className="w-full p-3 border border-gray-200 rounded-xl bg-white"
-              value={formData.brand}
-              onChange={e => setFormData({ ...formData, brand: e.target.value })}
-            >
-              {['aaa', 'bbb', 'ccc', 'Basmati', 'Sona Masoori'].map(b => (
-                <option key={b} value={b}>{b}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
+        {type === 'SALE' ? (
+          <>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Bags</label>
-              <input
-                type="number" min="1"
-                className="w-full p-3 border border-gray-200 rounded-xl"
-                value={formData.bags}
-                onChange={e => setFormData({ ...formData, bags: Number(e.target.value) })}
-              />
+              <label className="block text-sm font-medium text-gray-700 mb-1">Rice Brand</label>
+              <select
+                className="w-full p-3 border border-gray-200 rounded-xl bg-white"
+                value={formData.brand}
+                onChange={e => setFormData({ ...formData, brand: e.target.value })}
+              >
+                <option value="" disabled>Select Brand</option>
+                {brands.map(b => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
             </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Bags</label>
+                <input
+                  type="number" min="1"
+                  className="w-full p-3 border border-gray-200 rounded-xl"
+                  value={formData.bags}
+                  onChange={e => setFormData({ ...formData, bags: Number(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Price/Bag</label>
+                <input
+                  type="number" min="0" placeholder="0"
+                  className="w-full p-3 border border-gray-200 rounded-xl"
+                  value={formData.pricePerBag || ''}
+                  onChange={e => setFormData({ ...formData, pricePerBag: Number(e.target.value) })}
+                />
+              </div>
+            </div>
+
+            <div className="bg-gray-50 p-4 rounded-xl text-center">
+              <p className="text-xs text-gray-500 uppercase">Total Amount</p>
+              <p className="text-2xl font-bold text-gray-800">₹ {totalSaleAmount}</p>
+            </div>
+
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Price/Bag</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Amount Paid Now (Optional)</label>
               <input
                 type="number" min="0" placeholder="0"
-                className="w-full p-3 border border-gray-200 rounded-xl"
-                value={formData.pricePerBag || ''}
-                onChange={e => setFormData({ ...formData, pricePerBag: Number(e.target.value) })}
+                className="w-full p-3 border border-emerald-100 bg-emerald-50 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
+                value={formData.paidNow || ''}
+                onChange={e => setFormData({ ...formData, paidNow: Number(e.target.value) })}
+              />
+              <p className="text-xs text-gray-500 mt-1">If entered, creates a Payment record automatically.</p>
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Payment Amount</label>
+              <input
+                required min="1"
+                type="number"
+                className="w-full p-3 border border-gray-200 rounded-xl text-xl font-bold text-emerald-600"
+                placeholder="0"
+                value={formData.amount || ''}
+                onChange={e => setFormData({ ...formData, amount: Number(e.target.value) })}
               />
             </div>
-          </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Notes (Optional)</label>
+              <textarea
+                className="w-full p-3 border border-gray-200 rounded-xl"
+                rows={2}
+                value={formData.notes}
+                onChange={e => setFormData({ ...formData, notes: e.target.value })}
+              />
+            </div>
+          </>
+        )}
 
-          <div className="bg-gray-50 p-4 rounded-xl text-center">
-            <p className="text-xs text-gray-500 uppercase">Total Amount</p>
-            <p className="text-2xl font-bold text-gray-800">₹ {totalSaleAmount}</p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Amount Paid Now (Optional)</label>
-            <input
-              type="number" min="0" placeholder="0"
-              className="w-full p-3 border border-emerald-100 bg-emerald-50 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
-              value={formData.paidNow || ''}
-              onChange={e => setFormData({ ...formData, paidNow: Number(e.target.value) })}
-            />
-            <p className="text-xs text-gray-500 mt-1">If entered, creates a Payment record automatically.</p>
-          </div>
-        </>
-      ) : (
-        <>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Payment Amount</label>
-            <input
-              required min="1"
-              type="number"
-              className="w-full p-3 border border-gray-200 rounded-xl text-xl font-bold text-emerald-600"
-              placeholder="0"
-              value={formData.amount || ''}
-              onChange={e => setFormData({ ...formData, amount: Number(e.target.value) })}
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Notes (Optional)</label>
-            <textarea
-              className="w-full p-3 border border-gray-200 rounded-xl"
-              rows={2}
-              value={formData.notes}
-              onChange={e => setFormData({ ...formData, notes: e.target.value })}
-            />
-          </div>
-        </>
-      )}
-
-      <button
-        type="submit"
-        disabled={loading}
-        className={`w-full py-3 rounded-xl font-bold shadow-md text-white mt-4 disabled:opacity-50 ${type === 'SALE' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'
-          }`}
-      >
-        {loading ? 'Processing...' : (type === 'SALE' ? 'Record Sale' : 'Record Payment')}
-      </button>
-    </form>
-  );
+        <button
+          type="submit"
+          disabled={loading}
+          className={`w-full py-3 rounded-xl font-bold shadow-md text-white mt-4 disabled:opacity-50 ${type === 'SALE' ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'
+            }`}
+        >
+          {loading ? 'Processing...' : (type === 'SALE' ? 'Record Sale' : 'Record Payment')}
+        </button>
+      </form>
+      );
 }
 
-function AddCustomerForm({ user, onCancel }: { user: User, onCancel: () => void }) {
+      function AddCustomerForm({user, onCancel}: {user: User, onCancel: () => void }) {
   const [step, setStep] = useState(1);
-  const [formData, setFormData] = useState({
-    name: '',
-    phone: '',
-    address: '',
-    location: '' as Location | ''
+      const [formData, setFormData] = useState({
+        name: '',
+      phone: '',
+      address: '',
+      location: '' as Location | ''
   });
-  const [loading, setLoading] = useState(false);
+      const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formData.location || !formData.name) return;
+        e.preventDefault();
+      if (!formData.location || !formData.name) return;
 
-    setLoading(true);
-    try {
-      await addDoc(collection(db, `users/${user.uid}/customers`), {
-        ...formData,
-        balance: 0,
-        createdAt: serverTimestamp()
-      });
+      setLoading(true);
+      try {
+        await addDoc(collection(db, `users/${user.uid}/customers`), {
+          ...formData,
+          balance: 0,
+          createdAt: serverTimestamp()
+        });
       onCancel();
     } catch (err) {
-      console.error("Error adding customer:", err);
+        console.error("Error adding customer:", err);
       alert("Failed to add customer");
     } finally {
-      setLoading(false);
+        setLoading(false);
     }
   };
 
-  return (
-    <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-100">
-      <div className="flex justify-between items-center mb-6">
-        <h3 className="text-lg font-bold text-gray-800">
-          {step === 1 ? 'Select Location' : 'Customer Details'}
-        </h3>
-        <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">×</button>
-      </div>
-
-      {step === 1 ? (
-        <div className="grid grid-cols-1 gap-3">
-          {['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar'].map((loc) => (
-            <button
-              key={loc}
-              onClick={() => {
-                setFormData(prev => ({ ...prev, location: loc as Location }));
-                setStep(2);
-              }}
-              className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-left font-medium text-gray-700 hover:bg-emerald-50 hover:border-emerald-200 hover:text-emerald-700 transition-all active:scale-[0.98]"
-            >
-              {loc}
-            </button>
-          ))}
+      return (
+      <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-100">
+        <div className="flex justify-between items-center mb-6">
+          <h3 className="text-lg font-bold text-gray-800">
+            {step === 1 ? 'Select Location' : 'Customer Details'}
+          </h3>
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600">×</button>
         </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="bg-emerald-50 p-3 rounded-lg text-emerald-800 text-sm font-medium mb-4 flex justify-between items-center">
-            <span>Location: {formData.location}</span>
+
+        {step === 1 ? (
+          <div className="grid grid-cols-1 gap-3">
+            {['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar'].map((loc) => (
+              <button
+                key={loc}
+                onClick={() => {
+                  setFormData(prev => ({ ...prev, location: loc as Location }));
+                  setStep(2);
+                }}
+                className="p-4 bg-gray-50 border border-gray-200 rounded-xl text-left font-medium text-gray-700 hover:bg-emerald-50 hover:border-emerald-200 hover:text-emerald-700 transition-all active:scale-[0.98]"
+              >
+                {loc}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="bg-emerald-50 p-3 rounded-lg text-emerald-800 text-sm font-medium mb-4 flex justify-between items-center">
+              <span>Location: {formData.location}</span>
+              <button
+                type="button"
+                onClick={() => setStep(1)}
+                className="text-emerald-600 underline text-xs"
+              >
+                Change
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input
+                required
+                type="text"
+                className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
+                value={formData.name}
+                onChange={e => setFormData({ ...formData, name: e.target.value })}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
+              <input
+                required
+                type="tel"
+                className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
+                value={formData.phone}
+                onChange={e => setFormData({ ...formData, phone: e.target.value })}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Address (Optional)</label>
+              <textarea
+                className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
+                rows={2}
+                value={formData.address}
+                onChange={e => setFormData({ ...formData, address: e.target.value })}
+              />
+            </div>
+
             <button
-              type="button"
-              onClick={() => setStep(1)}
-              className="text-emerald-600 underline text-xs"
+              type="submit"
+              disabled={loading}
+              className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold shadow-md hover:bg-emerald-700 disabled:opacity-50 mt-4"
             >
-              Change
+              {loading ? 'Saving...' : 'Save Customer'}
             </button>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-            <input
-              required
-              type="text"
-              className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
-              value={formData.name}
-              onChange={e => setFormData({ ...formData, name: e.target.value })}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Phone</label>
-            <input
-              required
-              type="tel"
-              className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
-              value={formData.phone}
-              onChange={e => setFormData({ ...formData, phone: e.target.value })}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Address (Optional)</label>
-            <textarea
-              className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
-              rows={2}
-              value={formData.address}
-              onChange={e => setFormData({ ...formData, address: e.target.value })}
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold shadow-md hover:bg-emerald-700 disabled:opacity-50 mt-4"
-          >
-            {loading ? 'Saving...' : 'Save Customer'}
-          </button>
-        </form>
-      )}
-    </div>
-  );
+          </form>
+        )}
+      </div>
+      );
 }
 
-// --- Reports View ---
+      // --- Reports View ---
 
-function ReportsView({ user }: { user: User }) {
+      function ReportsView({user}: {user: User }) {
   const [generating, setGenerating] = useState(false);
 
   // Helper to download CSV
@@ -953,117 +1043,117 @@ function ReportsView({ user }: { user: User }) {
     const csvContent = "data:text/csv;charset=utf-8,"
       + data.map(e => e.join(",")).join("\n");
 
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", filename);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
   };
 
   const handleExportBalances = async () => {
-    setGenerating(true);
-    try {
-      // Using onSnapshot to get data once for simplicity, but getDocs is more standard for one-off. 
-      // Sticking to consistent patterns or just simple fetch.
-      // Better to use getDocs here but importing it might be extra char overhead if not already imported.
-      // We will assume getDocs is available or use onSnapshot with a promise wrapper if needed.
-      // Let's import getDocs at the top level or use the pattern we have. 
-      // Actually, let's keep it simple and just listen for one snapshot.
+        setGenerating(true);
+      try {
+        // Using onSnapshot to get data once for simplicity, but getDocs is more standard for one-off. 
+        // Sticking to consistent patterns or just simple fetch.
+        // Better to use getDocs here but importing it might be extra char overhead if not already imported.
+        // We will assume getDocs is available or use onSnapshot with a promise wrapper if needed.
+        // Let's import getDocs at the top level or use the pattern we have. 
+        // Actually, let's keep it simple and just listen for one snapshot.
 
-      // WAIT: I didn't import getDocs. I'll rely on a temporary listener.
-      // Optimization: Just allow the user to wait a sec. 
-      // Actually for this implementation I will trust that standard CSV generation is enough.
+        // WAIT: I didn't import getDocs. I'll rely on a temporary listener.
+        // Optimization: Just allow the user to wait a sec. 
+        // Actually for this implementation I will trust that standard CSV generation is enough.
 
-      // Let's assume we can fetch data. I'll implement a quick one-off listner helper.
-      new Promise<any[]>((resolve, reject) => {
-        const unsub = onSnapshot(collection(db, `users/${user.uid}/customers`), (snap) => {
-          const data = snap.docs.map(d => {
-            const val = d.data();
-            return [val.name, val.phone, val.location, val.balance];
-          });
-          resolve(data);
-          unsub();
-        }, reject);
-      }).then(data => {
-        const header = ["Name", "Phone", "Location", "Balance"];
-        downloadCSV([header, ...data], "customer_balances.csv");
-      });
+        // Let's assume we can fetch data. I'll implement a quick one-off listner helper.
+        new Promise<any[]>((resolve, reject) => {
+          const unsub = onSnapshot(collection(db, `users/${user.uid}/customers`), (snap) => {
+            const data = snap.docs.map(d => {
+              const val = d.data();
+              return [val.name, val.phone, val.location, val.balance];
+            });
+            resolve(data);
+            unsub();
+          }, reject);
+        }).then(data => {
+          const header = ["Name", "Phone", "Location", "Balance"];
+          downloadCSV([header, ...data], "customer_balances.csv");
+        });
 
     } catch (e) {
-      console.error(e);
+        console.error(e);
       alert("Export failed");
     } finally {
-      setGenerating(false);
+        setGenerating(false);
     }
   };
 
   const handleExportTransactions = async () => {
-    setGenerating(true);
-    try {
-      new Promise<any[]>((resolve, reject) => {
-        const unsub = onSnapshot(query(collection(db, `users/${user.uid}/transactions`), orderBy('date', 'desc')), (snap) => {
-          const data = snap.docs.map(d => {
-            const val = d.data();
-            const dateStr = val.date?.toDate ? val.date.toDate().toISOString() : '';
-            const details = val.type === 'SALE'
-              ? `rice: ${val.details.brand}, bags: ${val.details.bags}, price: ${val.details.pricePerBag}`
-              : val.details.notes;
-            return [dateStr, val.customerName, val.type, val.amount, `"${details}"`];
-          });
-          resolve(data);
-          unsub();
-        }, reject);
-      }).then(data => {
-        const header = ["Date", "Customer", "Type", "Amount", "Details"];
-        downloadCSV([header, ...data], "transactions.csv");
-      });
+        setGenerating(true);
+      try {
+        new Promise<any[]>((resolve, reject) => {
+          const unsub = onSnapshot(query(collection(db, `users/${user.uid}/transactions`), orderBy('date', 'desc')), (snap) => {
+            const data = snap.docs.map(d => {
+              const val = d.data();
+              const dateStr = val.date?.toDate ? val.date.toDate().toISOString() : '';
+              const details = val.type === 'SALE'
+                ? `rice: ${val.details.brand}, bags: ${val.details.bags}, price: ${val.details.pricePerBag}`
+                : val.details.notes;
+              return [dateStr, val.customerName, val.type, val.amount, `"${details}"`];
+            });
+            resolve(data);
+            unsub();
+          }, reject);
+        }).then(data => {
+          const header = ["Date", "Customer", "Type", "Amount", "Details"];
+          downloadCSV([header, ...data], "transactions.csv");
+        });
     } catch (e) {
-      console.error(e);
+        console.error(e);
       alert("Export failed");
     } finally {
-      setGenerating(false);
+        setGenerating(false);
     }
   };
 
-  return (
-    <div className="pb-20">
-      <h2 className="text-xl font-bold text-gray-800 mb-6">Reports & Exports</h2>
+      return (
+      <div className="pb-20">
+        <h2 className="text-xl font-bold text-gray-800 mb-6">Reports & Exports</h2>
 
-      <div className="space-y-4">
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center">
-          <div>
-            <h3 className="font-bold text-gray-800">Customer Balances</h3>
-            <p className="text-sm text-gray-500">List of all customer dues.</p>
+        <div className="space-y-4">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center">
+            <div>
+              <h3 className="font-bold text-gray-800">Customer Balances</h3>
+              <p className="text-sm text-gray-500">List of all customer dues.</p>
+            </div>
+            <button
+              onClick={handleExportBalances}
+              disabled={generating}
+              className="bg-emerald-100 text-emerald-700 p-3 rounded-xl hover:bg-emerald-200 transition-colors"
+            >
+              <FileText size={20} />
+            </button>
           </div>
-          <button
-            onClick={handleExportBalances}
-            disabled={generating}
-            className="bg-emerald-100 text-emerald-700 p-3 rounded-xl hover:bg-emerald-200 transition-colors"
-          >
-            <FileText size={20} />
-          </button>
+
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center">
+            <div>
+              <h3 className="font-bold text-gray-800">Transaction History</h3>
+              <p className="text-sm text-gray-500">Full log of sales & payments.</p>
+            </div>
+            <button
+              onClick={handleExportTransactions}
+              disabled={generating}
+              className="bg-blue-100 text-blue-700 p-3 rounded-xl hover:bg-blue-200 transition-colors"
+            >
+              <FileText size={20} />
+            </button>
+          </div>
         </div>
 
-        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center">
-          <div>
-            <h3 className="font-bold text-gray-800">Transaction History</h3>
-            <p className="text-sm text-gray-500">Full log of sales & payments.</p>
-          </div>
-          <button
-            onClick={handleExportTransactions}
-            disabled={generating}
-            className="bg-blue-100 text-blue-700 p-3 rounded-xl hover:bg-blue-200 transition-colors"
-          >
-            <FileText size={20} />
-          </button>
-        </div>
+        {generating && <p className="text-center text-gray-400 mt-4 text-sm animate-pulse">Generating CSV...</p>}
       </div>
-
-      {generating && <p className="text-center text-gray-400 mt-4 text-sm animate-pulse">Generating CSV...</p>}
-    </div>
-  );
+      );
 }
 
-export default App;
+      export default App;
