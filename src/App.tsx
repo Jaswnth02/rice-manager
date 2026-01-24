@@ -576,7 +576,30 @@ function CustomerPassbook({ user, customer, onBack, brands }: { user: User, cust
   const [showAddMoney, setShowAddMoney] = useState(false);
   const [showAddSale, setShowAddSale] = useState(false);
 
-  // ... (existing useEffect) ...
+  const [liveCustomer, setLiveCustomer] = useState(customer);
+
+  // Real-time listener for THIS customer's balance updates
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, `users/${user.uid}/customers`, customer.id), (doc) => {
+      if (doc.exists()) {
+        setLiveCustomer({ id: doc.id, ...doc.data() } as Customer);
+      }
+    });
+    return () => unsub();
+  }, [user.uid, customer.id]);
+
+  // Real-time listener for transactions
+  useEffect(() => {
+    const q = query(
+      collection(db, `users/${user.uid}/transactions`),
+      where('customerId', '==', customer.id),
+      orderBy('date', 'desc')
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[]);
+    });
+    return () => unsubscribe();
+  }, [user.uid, customer.id]);
 
   const handleTransactionSuccess = () => {
     setShowAddMoney(false);
