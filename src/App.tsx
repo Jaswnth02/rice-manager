@@ -425,9 +425,10 @@ function Dashboard({ user }: { user: User }) {
 
       <button
         onClick={onManageDetails}
-        className="w-full py-3 bg-white border border-gray-200 text-gray-600 font-bold rounded-xl shadow-sm hover:bg-gray-50 flex items-center justify-center gap-2"
+        className="w-full py-3 bg-emerald-50 border border-emerald-100 text-emerald-700 font-bold rounded-xl shadow-sm hover:bg-emerald-100 flex items-center justify-center gap-2"
       >
-        <span>Add or Modify Details</span>
+        <Plus size={18} />
+        <span>Add Rice Brand Details</span>
       </button>
 
       <div>
