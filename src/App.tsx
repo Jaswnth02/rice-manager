@@ -36,7 +36,7 @@ import {
 
 // --- Types ---
 type ViewState = 'DASHBOARD' | 'CUSTOMERS' | 'TRANSACTIONS' | 'REPORTS';
-type Location = 'Mothepalayam' | 'Mettupalayam' | 'Sirumugai' | 'Karamadai';
+type Location = 'Mothepalayam' | 'Mettupalayam' | 'Sirumugai' | 'Karamadai' | 'Alangombu' | 'Sankar Nagar';
 
 interface Customer {
   id: string;
@@ -490,7 +490,7 @@ function CustomersView({ user, onSelectCustomer }: { user: User, onSelectCustome
             </div>
 
             <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-              {['All', 'Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai'].map((loc) => (
+              {['All', 'Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar'].map((loc) => (
                 <button
                   key={loc}
                   onClick={() => setFilterLocation(loc as any)}
@@ -872,7 +872,7 @@ function AddCustomerForm({ user, onCancel }: { user: User, onCancel: () => void 
 
       {step === 1 ? (
         <div className="grid grid-cols-1 gap-3">
-          {['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai'].map((loc) => (
+          {['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar'].map((loc) => (
             <button
               key={loc}
               onClick={() => {
