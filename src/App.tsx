@@ -1139,4 +1139,106 @@ function ReportsView({ user }: { user: User }) {
   );
 }
 
+
+function BrandManager({ user, onClose }: { user: User, onClose: () => void }) {
+  const [brands, setBrands] = useState<string[]>([]);
+  const [newBrand, setNewBrand] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, `users/${user.uid}/settings/general`), (docSnap) => {
+      if (docSnap.exists() && docSnap.data().brands) {
+        setBrands(docSnap.data().brands);
+      } else {
+        setBrands(['Sona Masoori', 'Basmati', 'Ponni Rice', 'Idly Rice']);
+      }
+      setLoading(false);
+    });
+    return () => unsub();
+  }, [user.uid]);
+
+  const addBrand = async () => {
+    if (!newBrand.trim()) return;
+    try {
+      const brandRef = doc(db, `users/${user.uid}/settings/general`);
+      await setDoc(brandRef, {
+        brands: arrayUnion(newBrand.trim())
+      }, { merge: true });
+      setNewBrand('');
+    } catch (error) {
+      console.error("Error adding brand:", error);
+      alert("Failed to add brand");
+    }
+  };
+
+  const removeBrand = async (brand: string) => {
+    if (!confirm(`Delete ${brand}?`)) return;
+    try {
+      const brandRef = doc(db, `users/${user.uid}/settings/general`);
+      await updateDoc(brandRef, {
+        brands: arrayRemove(brand)
+      });
+    } catch (error) {
+      console.error("Error removing brand:", error);
+      alert("Failed to remove brand");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col max-h-[80vh]">
+        <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+          <h3 className="font-bold text-gray-800">Manage Rice Brands</h3>
+          <button onClick={onClose} className="p-2 -mr-2 text-gray-400 hover:text-gray-600">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="p-4 border-b border-gray-100">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newBrand}
+              onChange={(e) => setNewBrand(e.target.value)}
+              placeholder="Enter brand name..."
+              className="flex-1 border border-gray-300 rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              onKeyDown={(e) => e.key === 'Enter' && addBrand()}
+            />
+            <button
+              onClick={addBrand}
+              disabled={!newBrand.trim()}
+              className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold disabled:opacity-50"
+            >
+              Add
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-y-auto p-4 flex-1">
+          {loading ? (
+            <p className="text-center text-gray-400">Loading...</p>
+          ) : (
+            <div className="space-y-2">
+              {brands.map((b, i) => (
+                <div key={i} className="flex justify-between items-center p-3 bg-gray-50 rounded-xl">
+                  <span className="font-medium text-gray-700">{b}</span>
+                  <button
+                    onClick={() => removeBrand(b)}
+                    className="text-red-400 hover:text-red-600 p-1 font-bold text-xs uppercase"
+                  >
+                    Delete
+                  </button>
+                </div>
+              ))}
+              {brands.length === 0 && <p className="text-center text-gray-400">No brands added yet.</p>}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default App;
