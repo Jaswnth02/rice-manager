@@ -653,30 +653,7 @@ function CustomerPassbook({ user, customer, onBack, brands }: { user: User, cust
 
 
 
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
 
-  // Real-time listener for THIS customer's balance updates
-  const [liveCustomer, setLiveCustomer] = useState(customer);
-
-  useEffect(() => {
-    const unsub = onSnapshot(doc(db, `users/${user.uid}/customers`, customer.id), (doc) => {
-      if (doc.exists()) setLiveCustomer({ id: doc.id, ...doc.data() } as Customer);
-    });
-    return () => unsub();
-  }, [user.uid, customer.id]);
-
-
-  useEffect(() => {
-    const q = query(
-      collection(db, `users/${user.uid}/transactions`),
-      where('customerId', '==', customer.id),
-      orderBy('date', 'desc')
-    );
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[]);
-    });
-    return () => unsubscribe();
-  }, [user.uid, customer.id]);
 
   return (
     <div className="pb-4">
