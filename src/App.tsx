@@ -631,7 +631,7 @@ function CustomerPassbook({ user, customer, onBack, brands }: { user: User, cust
     <div className="h-full flex flex-col">
       {/* ... existing render ... */}
 
-      const [activeTab, setActiveTab] = useState<'HISTORY' | 'SALE' | 'PAYMENT'>('HISTORY');
+
       const [transactions, setTransactions] = useState<Transaction[]>([]);
 
       // Real-time listener for THIS customer's balance updates
