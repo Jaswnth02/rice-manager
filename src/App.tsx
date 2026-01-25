@@ -263,12 +263,7 @@ service cloud.firestore {
             Sign in with Google
           </button>
 
-          <button
-            onClick={handleGuestLogin}
-            className="w-full bg-gray-100 text-gray-600 py-3 rounded-xl font-medium hover:bg-gray-200 transition-colors"
-          >
-            Guest Mode (Test)
-          </button>
+
         </div>
       </div>
     );
