@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Grey Rice Grain -->
+  <path d="M180 50 C 80 50, 40 150, 40 256 C 40 380, 100 460, 200 460 C 280 460, 320 380, 320 256 C 320 120, 260 50, 180 50 Z" fill="none" stroke="#6b7280" stroke-width="32" />
+  <path d="M120 120 Q 160 120, 180 180" fill="none" stroke="#6b7280" stroke-width="20" opacity="0.6"/>
+
+  <!-- Green Trend Arrow -->
+  <path d="M180 380 L 280 280 L 340 340 L 460 180" fill="none" stroke="#16a34a" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M460 180 L 460 280 M 460 180 L 360 180" fill="none" stroke="#16a34a" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
