@@ -57,28 +57,7 @@ import autoTable from 'jspdf-autotable';
 import { format } from 'date-fns';
 
 // --- Utility Functions ---
-function useLongPress(callback: () => void, ms = 1000) {
-  const timerRef = React.useRef<any>(null);
 
-  const start = () => {
-    timerRef.current = setTimeout(callback, ms);
-  };
-
-  const stop = () => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  };
-
-  return {
-    onMouseDown: start,
-    onMouseUp: stop,
-    onMouseLeave: stop,
-    onTouchStart: start,
-    onTouchEnd: stop,
-  };
-}
 
 export const formatCurrency = (amount: number) => {
   return new Intl.NumberFormat('en-IN', {
@@ -435,9 +414,12 @@ service cloud.firestore {
         {content}
       </main>
 
+      <div className="h-24"></div>
+      <p className="text-xs text-center text-gray-300 pb-20">v1.1 (Delete Fix)</p>
+
       {/* Bottom Navigation */}
       {!activeCustomer && (
-        <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-6 py-3 flex justify-between items-center text-xs font-medium text-gray-500 z-20">
+        <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 flex justify-around p-3 pb-6 z-50 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
           <button
             onClick={() => setCurrentView('DASHBOARD')}
             className={`flex flex-col items-center gap-1 ${currentView === 'DASHBOARD' ? 'text-emerald-600' : ''}`}
@@ -1065,7 +1047,7 @@ function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteT
 }
 
 function PassbookTransactionItem({ transaction, onDelete }: { transaction: Transaction, onDelete: () => void }) {
-  const longPressProps = useLongPress(onDelete, 1000);
+
 
   return (
     <div
