@@ -150,7 +150,7 @@ function App() {
   const [txToDelete, setTxToDelete] = useState<Transaction | null>(null);
   const [initialStockBrand, setInitialStockBrand] = useState<string | null>(null); // For redirect from BrandManager
 
-  const APP_VERSION = "v1.1.0 - " + new Date().toLocaleString();
+  const APP_VERSION = "v1.4";
 
   // ... (Fetch Brands code) ...
 
