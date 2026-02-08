@@ -150,6 +150,8 @@ function App() {
   const [txToDelete, setTxToDelete] = useState<Transaction | null>(null);
   const [initialStockBrand, setInitialStockBrand] = useState<string | null>(null); // For redirect from BrandManager
 
+  const APP_VERSION = "v1.1.0 - " + new Date().toLocaleString();
+
   // ... (Fetch Brands code) ...
 
   const handleBrandAdded = (brandName: string) => {
@@ -503,7 +505,7 @@ service cloud.firestore {
       </main>
 
       <div className="h-24"></div>
-      <p className="text-xs text-center text-gray-300 pb-20">v1.3 (Logic Fix)</p>
+      <p className="text-xs text-center text-gray-300 pb-20">{APP_VERSION}</p>
 
       {/* Bottom Navigation */}
       {!activeCustomer && (
