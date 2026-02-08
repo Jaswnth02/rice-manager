@@ -21,7 +21,8 @@ import {
   Trash2,
   RotateCcw,
   Layers,
-  ArrowLeft
+  ArrowLeft,
+  BookOpen
 } from 'lucide-react';
 import { auth, googleProvider, db } from './firebase';
 import {
@@ -49,6 +50,8 @@ import {
   writeBatch,
   deleteDoc,
   runTransaction,
+  deleteField, // Imported
+  increment,
   type QuerySnapshot,
   type DocumentData
 } from 'firebase/firestore';
@@ -92,6 +95,27 @@ interface Customer {
   createdAt: any;
 }
 
+interface TransactionDetails {
+  brand?: string;
+  bags?: number;
+  pricePerBag?: number;
+  notes?: string;
+  isOpeningBalance?: boolean;
+  isBalanceAdjustment?: boolean;
+  profit?: number;
+  batchesUsed?: { id: string; count: number; cost: number }[];
+}
+
+export interface Batch {
+  id: string;
+  count: number;
+  initialCount?: number; // Track original size
+  cost: number;
+  date: any;
+}
+
+
+
 interface Transaction {
   id: string;
   customerId: string;
@@ -99,15 +123,15 @@ interface Transaction {
   type: 'SALE' | 'PAYMENT';
   amount: number;
   date: any;
-  details?: {
-    brand?: string;
-    bags?: number;
-    pricePerBag?: number;
-    notes?: string;
-  };
+  details?: TransactionDetails;
 }
 
+
+
 // --- Main Component ---
+// Helper to safely store brand names as keys (Firebase doesn't like dots in path)
+const safeBrandKey = (brand: string) => brand.replace(/\./g, '_DOT_');
+
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -119,25 +143,42 @@ function App() {
   const [showLocationManager, setShowLocationManager] = useState(false);
   const [showMessageManager, setShowMessageManager] = useState(false);
   const [brands, setBrands] = useState<string[]>([]);
+  const [brandCosts, setBrandCosts] = useState<Record<string, number>>({});
   const [locations, setLocations] = useState<string[]>([]);
   // Delete Confirmation State
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [txToDelete, setTxToDelete] = useState<Transaction | null>(null);
+  const [initialStockBrand, setInitialStockBrand] = useState<string | null>(null); // For redirect from BrandManager
 
-  // Fetch Brands and Locations
+  // ... (Fetch Brands code) ...
+
+  const handleBrandAdded = (brandName: string) => {
+    // Prompt user to add stock immediately
+    if (window.confirm(`Brand '${brandName}' added. Do you want to add stock now?`)) {
+      setShowBrandManager(false);
+      setCurrentView('INVENTORY');
+      setInitialStockBrand(brandName);
+    }
+  };
+
+
   useEffect(() => {
     if (!user) return;
     const unsub = onSnapshot(doc(db, `users/${user.uid}/settings/general`), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
         if (data.brands) setBrands(data.brands);
-        else setBrands(['Sona Masoori', 'Basmati', 'Ponni Rice', 'Idly Rice']);
+        else setBrands([]);
+
+        if (data.brandCosts) setBrandCosts(data.brandCosts);
+        else setBrandCosts({});
 
         if (data.locations) setLocations(data.locations);
-        else setLocations(['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar']);
+        else setLocations([]);
       } else {
-        setBrands(['Sona Masoori', 'Basmati', 'Ponni Rice', 'Idly Rice']);
-        setLocations(['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar']);
+        setBrands([]);
+        setBrandCosts({});
+        setLocations([]);
       }
     });
     return () => unsub();
@@ -179,8 +220,6 @@ function App() {
   // Since SendMessageModal is outside App, formatCurrency needs to be available. 
   // We already moved it up in first chunk. 
   // So we remove the local definition inside App if it exists, or just leave it if I didn't verify it was inside.
-  // Wait, I didn't see where it was defined before. Based on usage, it was likely inside App or Passbook.
-  // I will assume it was inside App or Passbook and remove it if found.
   // Actually, let's just make sure it's not redefined.
 
   const handleGoogleLogin = async () => {
@@ -324,58 +363,107 @@ service cloud.firestore {
 
   const confirmDelete = async () => {
     if (!txToDelete) return;
+    if (!txToDelete.customerId) {
+      alert("Cannot delete: Missing Customer ID");
+      return;
+    }
 
     setLoading(true);
     try {
       await runTransaction(db, async (transaction) => {
-        // 1. Get current customer data for balance update
         const customerRef = doc(db, `users/${user.uid}/customers`, txToDelete.customerId);
+        let inventoryRef = null;
+        let invSnap = null;
+
+        // 1. READ: Get Customer
         const customerSnap = await transaction.get(customerRef);
 
+        // 2. READ: Get Inventory (if needed)
+        // Ensure brand is valid string before creating ref
+        if (txToDelete.type === 'SALE' && txToDelete.details?.brand && txToDelete.details.brand.trim() !== '') {
+          inventoryRef = doc(db, `users/${user.uid}/inventory`, txToDelete.details.brand);
+          invSnap = await transaction.get(inventoryRef);
+        }
+
+        // --- ALL READS COMPLETE ---
+
+        // 3. WRITE: Update Customer Balance
         if (customerSnap.exists()) {
           const currentBalance = customerSnap.data().balance || 0;
           let newBalance = currentBalance;
 
-          // 2. Reverse Balance Calculation
           if (txToDelete.type === 'SALE') {
-            // If it was a sale, we added to balance (debt increased). Now we subtract.
             newBalance = currentBalance - txToDelete.amount;
           } else {
-            // If it was a payment, we subtracted from balance (debt decreased). Now we add back.
             newBalance = currentBalance + txToDelete.amount;
           }
-
-          // 4. Update Customer Balance
           transaction.update(customerRef, { balance: newBalance });
         } else {
           console.warn("Customer not found, skipping balance update");
         }
 
-        // 3. Reverse Inventory (if it was a SALE with brand details)
-        if (txToDelete.type === 'SALE' && txToDelete.details?.brand && txToDelete.details?.bags) {
-          const inventoryRef = doc(db, `users/${user.uid}/inventory`, txToDelete.details.brand);
-          const invSnap = await transaction.get(inventoryRef);
+        // 4. WRITE: Update Inventory
+        if (inventoryRef && invSnap && invSnap.exists() && txToDelete.details?.bags) {
+          const invData = invSnap.data();
+          const currentStock = invData.count || 0;
+          let currentBatches = (invData.batches || []) as Batch[];
 
-          if (invSnap.exists()) {
-            const currentStock = invSnap.data().count || 0;
-            transaction.update(inventoryRef, {
-              count: currentStock + txToDelete.details.bags,
-              lastUpdated: serverTimestamp()
+          // Try to restore to specific batches if tracked
+          if (txToDelete.details.batchesUsed && txToDelete.details.batchesUsed.length > 0) {
+            txToDelete.details.batchesUsed.forEach(usage => {
+              const batchIndex = currentBatches.findIndex(b => b.id === usage.id);
+              if (batchIndex >= 0) {
+                // Restore to original batch
+                currentBatches[batchIndex].count += usage.count;
+              } else {
+                // Batch missing? Try to find by cost or add new
+                const similarBatch = currentBatches.find(b => b.cost === usage.cost);
+                if (similarBatch) {
+                  similarBatch.count += usage.count;
+                } else {
+                  // Create restored batch
+                  currentBatches.push({
+                    id: usage.id || Date.now().toString(),
+                    count: usage.count,
+                    cost: usage.cost,
+                    date: Timestamp.now() // Approximate date
+                  });
+                }
+              }
             });
+          } else {
+            // Legacy/Fallback: Add to the most recent batch or create one
+            if (currentBatches.length > 0) {
+              // Add to the last batch (assuming it's the newest)
+              currentBatches[currentBatches.length - 1].count += txToDelete.details.bags;
+            } else {
+              // No batches? Create one
+              currentBatches.push({
+                id: 'restored_' + Date.now(),
+                count: txToDelete.details.bags,
+                cost: 0, // Unknown cost
+                date: Timestamp.now()
+              });
+            }
           }
+
+          transaction.update(inventoryRef, {
+            count: currentStock + txToDelete.details.bags,
+            batches: currentBatches,
+            lastUpdated: serverTimestamp()
+          });
         }
 
-
-
-        // 5. Delete Transaction Document
+        // 5. WRITE: Delete Transaction
         const txRef = doc(db, `users/${user.uid}/transactions`, txToDelete.id);
         transaction.delete(txRef);
       });
 
       // alert("Transaction deleted successfully");
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error deleting transaction:", error);
-      alert("Failed to delete transaction");
+      // Show more detailed error
+      alert(`Failed to delete transaction. Error: ${error.code || error.message || JSON.stringify(error)}`);
     } finally {
       setLoading(false);
       setShowDeleteConfirm(false);
@@ -386,7 +474,7 @@ service cloud.firestore {
   // Determine main content based on state
   let content;
   if (activeCustomer) {
-    content = <CustomerPassbook user={user} customer={activeCustomer} onBack={handleBackToCustomers} brands={brands} locations={locations} onDeleteTransaction={handleDeleteTransaction} />
+    content = <CustomerPassbook user={user} customer={activeCustomer} onBack={handleBackToCustomers} brands={brands} locations={locations} onDeleteTransaction={handleDeleteTransaction} brandCosts={brandCosts} />
   } else if (currentView === 'DASHBOARD') {
     content = <Dashboard user={user} onManageDetails={() => setShowBrandManager(true)} onManageLocations={() => setShowLocationManager(true)} onManageMessages={() => setShowMessageManager(true)} onDeleteTransaction={handleDeleteTransaction} />;
   } else if (currentView === 'CUSTOMERS') {
@@ -394,7 +482,7 @@ service cloud.firestore {
   } else if (currentView === 'REPORTS') {
     content = <ReportsView user={user} />;
   } else if (currentView === 'INVENTORY') {
-    content = <InventoryView user={user} />;
+    content = <InventoryView user={user} initialAddStockBrand={initialStockBrand} onClearInitialBrand={() => setInitialStockBrand(null)} brandCosts={brandCosts} />;
   }
 
   return (
@@ -415,7 +503,7 @@ service cloud.firestore {
       </main>
 
       <div className="h-24"></div>
-      <p className="text-xs text-center text-gray-300 pb-20">v1.1 (Delete Fix)</p>
+      <p className="text-xs text-center text-gray-300 pb-20">v1.3 (Logic Fix)</p>
 
       {/* Bottom Navigation */}
       {!activeCustomer && (
@@ -452,7 +540,7 @@ service cloud.firestore {
       )}
 
       {showBrandManager && (
-        <BrandManager user={user} onClose={() => setShowBrandManager(false)} />
+        <BrandManager user={user} onClose={() => setShowBrandManager(false)} onBrandAdded={handleBrandAdded} brandCosts={brandCosts} />
       )}
       {showLocationManager && (
         <LocationManager user={user} onClose={() => setShowLocationManager(false)} />
@@ -479,13 +567,13 @@ service cloud.firestore {
                 onClick={() => setShowDeleteConfirm(false)}
                 className="flex-1 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
               >
-                No
+                Cancel
               </button>
               <button
                 onClick={confirmDelete}
                 className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition-colors shadow-md shadow-red-200"
               >
-                Yes, Delete
+                Delete
               </button>
             </div>
           </div>
@@ -503,7 +591,8 @@ function Dashboard({ user, onManageDetails, onManageLocations, onManageMessages,
   const [stats, setStats] = useState({
     pending: 0,
     collectedToday: 0,
-    salesToday: 0
+    salesToday: 0,
+    profitToday: 0 // New
   });
   const [recentTx, setRecentTx] = useState<Transaction[]>([]);
   const [showFeaturesMenu, setShowFeaturesMenu] = useState(false);
@@ -546,12 +635,16 @@ function Dashboard({ user, onManageDetails, onManageLocations, onManageMessages,
     const unsubDaily = onSnapshot(qDaily, (snap) => {
       let collected = 0;
       let sales = 0;
+      let profit = 0;
       snap.docs.forEach(d => {
         const data = d.data();
         if (data.type === 'PAYMENT') collected += (data.amount || 0);
-        if (data.type === 'SALE') sales += (data.amount || 0);
+        if (data.type === 'SALE' && !data.details?.isOpeningBalance && !data.details?.isBalanceAdjustment) {
+          sales += (data.amount || 0);
+          profit += (data.profit || 0); // Aggregate top-level profit
+        }
       });
-      setStats(prev => ({ ...prev, collectedToday: collected, salesToday: sales }));
+      setStats(prev => ({ ...prev, collectedToday: collected, salesToday: sales, profitToday: profit }));
     });
 
     return () => {
@@ -564,20 +657,31 @@ function Dashboard({ user, onManageDetails, onManageLocations, onManageMessages,
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-red-50 col-span-2 relative overflow-hidden">
-          <div className="absolute top-0 right-0 p-4 opacity-5">
+        {/* Top Left: Total Pending */}
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-red-50 h-32 flex flex-col justify-center relative overflow-hidden">
+          <div className="absolute -right-4 -bottom-4 opacity-10">
             <AlertCircle size={80} className="text-red-500" />
           </div>
-          <p className="text-gray-500 text-sm mb-1 uppercase tracking-wider font-semibold">Total Pending</p>
-          <p className="text-4xl font-black text-red-600">₹ {stats.pending.toLocaleString('en-IN')}</p>
+          <p className="text-gray-500 text-xs mb-1 uppercase font-bold">Total Pending</p>
+          <p className="text-2xl font-black text-red-600">₹ {stats.pending.toLocaleString('en-IN')}</p>
         </div>
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-emerald-50">
-          <p className="text-gray-400 text-xs mb-1 uppercase font-bold">Collected Today</p>
-          <p className="text-xl font-black text-emerald-600">₹ {stats.collectedToday.toLocaleString('en-IN')}</p>
+
+        {/* Top Right: Profit Today */}
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-emerald-50 h-32 flex flex-col justify-center">
+          <p className="text-gray-400 text-xs mb-1 uppercase font-bold">Profit</p>
+          <p className="text-2xl font-black text-emerald-600">₹ {stats.profitToday.toLocaleString('en-IN')}</p>
         </div>
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-blue-50">
+
+        {/* Bottom Left: Sales Today */}
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-blue-50 h-32 flex flex-col justify-center">
           <p className="text-gray-400 text-xs mb-1 uppercase font-bold">Sales Today</p>
-          <p className="text-xl font-black text-blue-600">₹ {stats.salesToday.toLocaleString('en-IN')}</p>
+          <p className="text-2xl font-black text-blue-600">₹ {stats.salesToday.toLocaleString('en-IN')}</p>
+        </div>
+
+        {/* Bottom Right: Collected Today */}
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-emerald-50 h-32 flex flex-col justify-center">
+          <p className="text-gray-400 text-xs mb-1 uppercase font-bold">Collected Today</p>
+          <p className="text-2xl font-black text-emerald-600">₹ {stats.collectedToday.toLocaleString('en-IN')}</p>
         </div>
       </div>
 
@@ -716,6 +820,7 @@ function CustomersView({ user, onSelectCustomer, locations }: { user: User, onSe
   const [searchQuery, setSearchQuery] = useState('');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [deleteMode, setDeleteMode] = useState(false);
+  const [customerToDelete, setCustomerToDelete] = useState<Customer | null>(null);
 
   // Fetch Customers
   useEffect(() => {
@@ -732,19 +837,19 @@ function CustomersView({ user, onSelectCustomer, locations }: { user: User, onSe
     return () => unsubscribe();
   }, [user.uid]);
 
-  const handleDeleteCustomer = async (e: React.MouseEvent, customer: Customer) => {
+  const handleDeleteCustomer = (e: React.MouseEvent, customer: Customer) => {
     e.stopPropagation();
-    if (window.confirm(`Are you sure you want to delete ${customer.name}? This cannot be undone.`)) {
-      try {
-        await deleteDoc(doc(db, `users/${user.uid}/customers`, customer.id));
-        // Optionally delete transactions associated? 
-        // For simple app, maybe just leave them or batch delete.
-        // Leaving transactions for now as "Deleted Customer" or we can implement comprehensive delete later.
-        // For now user just wants to remove the customer entry from list.
-      } catch (err) {
-        console.error("Error deleting customer:", err);
-        alert("Failed to delete customer.");
-      }
+    setCustomerToDelete(customer);
+  };
+
+  const confirmDeleteCustomer = async () => {
+    if (!customerToDelete) return;
+    try {
+      await deleteDoc(doc(db, `users/${user.uid}/customers`, customerToDelete.id));
+      setCustomerToDelete(null);
+    } catch (err) {
+      console.error("Error deleting customer:", err);
+      alert("Failed to delete customer.");
     }
   };
 
@@ -865,14 +970,49 @@ function CustomersView({ user, onSelectCustomer, locations }: { user: User, onSe
           </div>
         </>
       )}
+
+      {/* Customer Delete Confirmation Modal */}
+      {customerToDelete && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm animate-in fade-in zoom-in duration-200">
+            <div className="flex flex-col items-center text-center mb-6">
+              <div className="bg-red-100 p-3 rounded-full mb-4">
+                <Trash2 size={24} className="text-red-600" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900">Delete Customer?</h3>
+              <p className="text-gray-500 text-sm mt-2">
+                Are you sure you want to delete <span className="font-bold text-gray-700">{customerToDelete.name}</span>?
+              </p>
+              <p className="text-xs text-red-500 mt-2">
+                This process cannot be undone.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setCustomerToDelete(null)}
+                className="flex-1 py-2 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDeleteCustomer}
+                className="flex-1 py-2 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 shadow-md shadow-red-200"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteTransaction }: { user: User, customer: Customer, onBack: () => void, brands: string[], locations: string[], onDeleteTransaction: (tx: Transaction) => void }) {
+function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteTransaction, brandCosts }: { user: User, customer: Customer, onBack: () => void, brands: string[], locations: string[], onDeleteTransaction: (tx: Transaction) => void, brandCosts: Record<string, number> }) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [showAddMoney, setShowAddMoney] = useState(false);
   const [showAddSale, setShowAddSale] = useState(false);
+  const [showAddBalance, setShowAddBalance] = useState(false); // New State
   const [showSendMessage, setShowSendMessage] = useState(false);
   const [isEditingCustomer, setIsEditingCustomer] = useState(false);
 
@@ -888,15 +1028,69 @@ function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteT
     return () => unsub();
   }, [user.uid, customer.id]);
 
+  // Add Balance Logic
+  const handleAddBalance = async (amount: number, note: string) => {
+    try {
+      const txRef = collection(db, `users/${user.uid}/transactions`);
+      const custRef = doc(db, `users/${user.uid}/customers`, liveCustomer.id);
+
+      await runTransaction(db, async (transaction) => {
+        const custDoc = await transaction.get(custRef);
+        if (!custDoc.exists()) throw "Customer does not exist!";
+
+        const newBalance = custDoc.data().balance + amount;
+
+        // Create Transaction
+        const newTxRef = doc(txRef);
+        transaction.set(newTxRef, {
+          customerId: liveCustomer.id,
+          customerName: liveCustomer.name,
+          type: 'SALE',
+          amount: amount,
+          date: serverTimestamp(),
+          details: {
+            notes: note,
+            isBalanceAdjustment: true
+          }
+        });
+
+        // Update Balance
+        transaction.update(custRef, { balance: newBalance });
+      });
+
+      setShowAddBalance(false);
+    } catch (e) {
+      console.error("Error adding balance:", e);
+      alert("Failed to add balance");
+    }
+  };
+
   // Real-time listener for transactions
   useEffect(() => {
     const q = query(
       collection(db, `users/${user.uid}/transactions`),
-      where('customerId', '==', customer.id),
-      orderBy('date', 'desc')
+      where('customerId', '==', customer.id)
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[]);
+      const txs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[];
+      // Client-side sort
+      txs.sort((a, b) => {
+        // Treat null/pending dates as "Now" so they appear at the top
+        const da = a.date?.toDate ? a.date.toDate() : new Date();
+        const db = b.date?.toDate ? b.date.toDate() : new Date();
+        const timeDiff = db.getTime() - da.getTime();
+
+        if (timeDiff !== 0) return timeDiff;
+
+        // Tie-breaker: PAYMENT comes before SALE (visually above)
+        // If 'a' is SALE and 'b' is PAYMENT, 'b' should come first (return -1 is wrong here, logic check)
+        // Array: [PAYMENT, SALE]
+
+        if (a.type === 'PAYMENT' && b.type === 'SALE') return -1; // a comes first
+        if (a.type === 'SALE' && b.type === 'PAYMENT') return 1;  // b comes first
+        return 0;
+      });
+      setTransactions(txs);
     });
     return () => unsubscribe();
   }, [user.uid, customer.id]);
@@ -922,6 +1116,7 @@ function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteT
             customer={customer}
             onSuccess={handleTransactionSuccess}
             brands={brands}
+            brandCosts={brandCosts}
           />
         </div>
       </div>
@@ -944,6 +1139,7 @@ function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteT
             customer={customer}
             onSuccess={handleTransactionSuccess}
             brands={brands}
+            brandCosts={brandCosts}
           />
         </div>
       </div>
@@ -1012,7 +1208,15 @@ function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteT
           </button>
         </div>
 
-        <div className="mt-4 flex justify-center">
+        <div className="mt-4 flex flex-col gap-2 justify-center items-center">
+          <button
+            onClick={() => setShowAddBalance(true)}
+            className="text-gray-500 font-bold text-xs flex items-center gap-1 hover:text-gray-700 hover:bg-gray-50 px-3 py-1.5 rounded-full transition-colors"
+          >
+            <Plus size={14} />
+            <span>Add Old Balance</span>
+          </button>
+
           <button
             onClick={() => setShowSendMessage(true)}
             className="text-emerald-600 font-medium text-sm flex items-center gap-2 hover:bg-emerald-50 px-4 py-2 rounded-full transition-colors"
@@ -1042,6 +1246,12 @@ function CustomerPassbook({ user, customer, onBack, brands, locations, onDeleteT
           onClose={() => setShowSendMessage(false)}
         />
       )}
+      {showAddBalance && (
+        <AddBalanceModal
+          onClose={() => setShowAddBalance(false)}
+          onSave={handleAddBalance}
+        />
+      )}
     </div>
   );
 }
@@ -1055,11 +1265,11 @@ function PassbookTransactionItem({ transaction, onDelete }: { transaction: Trans
     >
       <div className="flex gap-3">
         <div className={`mt-1 p-2 rounded-lg ${transaction.type === 'SALE' ? 'bg-red-50 text-red-500' : 'bg-emerald-50 text-emerald-500'}`}>
-          {transaction.type === 'SALE' ? <ShoppingBag size={18} /> : <IndianRupee size={18} />}
+          {transaction.details?.isOpeningBalance ? <BookOpen size={18} /> : (transaction.type === 'SALE' ? <ShoppingBag size={18} /> : <IndianRupee size={18} />)}
         </div>
         <div>
           <p className="font-bold text-gray-800">
-            {transaction.type === 'SALE' ? 'Rice Sale' : 'Payment Received'}
+            {transaction.details?.isOpeningBalance ? 'Opening Balance' : (transaction.type === 'SALE' ? 'Rice Sale' : 'Payment Received')}
           </p>
           {transaction.details?.brand && (
             <p className="text-xs text-gray-600 font-medium">
@@ -1070,7 +1280,9 @@ function PassbookTransactionItem({ transaction, onDelete }: { transaction: Trans
             <p className="text-xs text-gray-500 italic mt-0.5">"{transaction.details.notes}"</p>
           )}
           <p className="text-[10px] text-gray-400 mt-1">
-            {transaction.date?.toDate ? transaction.date.toDate().toLocaleDateString('en-IN') + ' ' + transaction.date.toDate().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : ''}
+            {transaction.date?.toDate
+              ? transaction.date.toDate().toLocaleDateString('en-IN') + ' ' + transaction.date.toDate().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+              : <span className="text-emerald-600 font-bold animate-pulse">Just now...</span>}
           </p>
         </div>
       </div>
@@ -1092,58 +1304,221 @@ function PassbookTransactionItem({ transaction, onDelete }: { transaction: Trans
   );
 }
 
-function TransactionForm({ type, user, customer, onSuccess, brands }: { type: 'SALE' | 'PAYMENT', user: User, customer: Customer, onSuccess: () => void, brands: string[] }) {
+
+function AddBalanceModal({ onClose, onSave }: { onClose: () => void, onSave: (amount: number, note: string) => void }) {
+  const [amount, setAmount] = useState<number | ''>('');
+  const [note, setNote] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    if (amount === '' || amount <= 0) return;
+    setLoading(true);
+    await onSave(Number(amount), note);
+    setLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl overflow-hidden animate-in zoom-in-95">
+        <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+          <h3 className="font-bold text-gray-800">Add Old Balance</h3>
+          <button onClick={onClose} className="p-2 -mr-2 text-gray-400 hover:text-gray-600">
+            <X size={24} />
+          </button>
+        </div>
+        <div className="p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-bold text-gray-700 mb-2">Amount (₹)</label>
+            <input
+              type="number"
+              value={amount}
+              onChange={(e) => setAmount(Number(e.target.value))}
+              className="w-full p-3 text-2xl font-bold text-center border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              placeholder="0"
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-bold text-gray-700 mb-2">Note (Optional)</label>
+            <input
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              className="w-full p-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              placeholder="e.g. Previous pending"
+            />
+          </div>
+          <button
+            onClick={handleSubmit}
+            disabled={loading || amount === '' || amount <= 0}
+            className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold shadow-lg hover:bg-emerald-700 disabled:opacity-50 mt-2"
+          >
+            {loading ? 'Adding...' : 'Add Balance'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+function TransactionForm({ type, user, customer, onSuccess, brands, brandCosts }: { type: 'SALE' | 'PAYMENT', user: User, customer: Customer, onSuccess: () => void, brands: string[], brandCosts: Record<string, number> }) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
-    brand: 'Sona Masoori',
+    brand: brands.length > 0 ? brands[0] : '',
     bags: 1,
     pricePerBag: 0,
+    buyingPrice: 0, // NEW: Cost Price
     amount: 0, // For Payment
     notes: '',
     paidNow: 0 // Partial Payment for SALE
   });
+  const [error, setError] = useState<string | null>(null);
 
+  // Auto-fill buying price when brand changes
+  useEffect(() => {
+    if (type === 'SALE' && formData.brand) {
+      const cost = (brandCosts || {})[safeBrandKey(formData.brand)] || 0;
+      setFormData(prev => ({ ...prev, buyingPrice: cost }));
+    }
+  }, [formData.brand, type, brandCosts]);
   const totalSaleAmount = type === 'SALE' ? (formData.bags * formData.pricePerBag) : 0;
+  // Profit = (Selling Price - Buying Price) * Bags
+  const totalProfit = type === 'SALE' ? ((formData.pricePerBag - formData.buyingPrice) * formData.bags) : 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
 
     try {
       await runTransaction(db, async (transaction) => {
         const timestamp = serverTimestamp();
-        const txCol = collection(db, `users/${user.uid}/transactions`);
-        const newTxRef = doc(txCol);
 
-        // Inventory Ref (only check for SALE)
-        let inventoryRef;
-        let currentStock = 0;
+        // --- 1. READS (Must come first) ---
+
+        // A. Inventory Read (for FIFO)
+        let currentTotalProfit = 0;
+        let updatedBatches: Batch[] = [];
+        let inventoryUpdate: any = null;
+        let inventoryRef: any = null;
+        let batchesUsedRecord: { id: string, count: number, cost: number }[] = [];
 
         if (type === 'SALE') {
+          // Use safeBrandKey to ensure consistent ID (assuming creation uses it, or valid ID)
+          // For now, using logic consistent with typical Firestore usage
+          // Note: updateStock uses 'selectedBrand' directly? We should check. 
+          // But for 'FIFODebug' (no dots), it matches.
           inventoryRef = doc(db, `users/${user.uid}/inventory`, formData.brand);
           const invSnap = await transaction.get(inventoryRef);
+
           if (invSnap.exists()) {
-            currentStock = invSnap.data().count || 0;
+            const invData = invSnap.data() as any;
+
+            // Check for sufficient stock
+            const currentCount = invData.count || 0;
+
+            if (currentCount === 0 && formData.bags > 0) {
+              throw new Error(`Brand ${formData.brand} is not there in the stack`);
+            }
+
+            if (formData.bags > currentCount) {
+              throw new Error(`Insufficient stock. Available: ${currentCount} bags, Requested: ${formData.bags}`);
+            }
+
+            const currentBatches: Batch[] = invData.batches || [];
+            updatedBatches = [...currentBatches];
+
+            // Sort Oldest First
+            updatedBatches.sort((a, b) => {
+              const dateA = a.date?.seconds || 0;
+              const dateB = b.date?.seconds || 0;
+              return dateA - dateB;
+            });
+
+            const totalNeeded = formData.bags;
+            let remaining = totalNeeded;
+
+            // FIFO Calculation
+            // FIFO Calculation
+
+            if (updatedBatches.length > 0) {
+              const newBatchList: Batch[] = [];
+
+              for (const batch of updatedBatches) {
+                if (remaining <= 0) {
+                  newBatchList.push(batch);
+                  continue;
+                }
+
+                if (batch.count <= remaining) {
+                  // Full batch consumed
+                  const usage = batch.count;
+                  const profitForBatch = (formData.pricePerBag - batch.cost) * usage;
+                  currentTotalProfit += profitForBatch;
+                  remaining -= usage;
+
+                  batchesUsedRecord.push({ id: batch.id, count: usage, cost: batch.cost });
+                } else {
+                  // Partial batch
+                  const usage = remaining;
+                  const profitForBatch = (formData.pricePerBag - batch.cost) * usage;
+                  currentTotalProfit += profitForBatch;
+
+                  batch.count -= usage;
+                  remaining = 0;
+
+                  batchesUsedRecord.push({ id: batch.id, count: usage, cost: batch.cost });
+                  newBatchList.push(batch);
+                }
+              }
+              updatedBatches = newBatchList;
+            } else {
+              // Fallback: Default Cost
+              const defaultCost = (brandCosts || {})[safeBrandKey(formData.brand)] || 0;
+              currentTotalProfit = (formData.pricePerBag - defaultCost) * totalNeeded;
+            }
+
+            // Prepare Inventory Update (to be executed in Writes phase)
+            inventoryUpdate = {
+              count: increment(-formData.bags),
+              lastUpdated: serverTimestamp(),
+              batches: updatedBatches
+            };
+          } else {
+            // Document doesn't exist, so stock is 0
+            if (formData.bags > 0) {
+              throw new Error(`Brand ${formData.brand} is not there in the stack`);
+            }
           }
         }
 
-        // Calculations
-        const amount = type === 'SALE' ? totalSaleAmount : formData.amount;
-        let newBalance = customer.balance;
-
-        if (type === 'SALE') {
-          newBalance = customer.balance + totalSaleAmount - formData.paidNow;
+        // B. Customer Read
+        const customerRef = doc(db, `users/${user.uid}/customers`, customer.id);
+        const custSnap = await transaction.get(customerRef);
+        let currentBalance = 0;
+        if (custSnap.exists()) {
+          currentBalance = custSnap.data().balance || 0;
         } else {
-          newBalance = customer.balance - formData.amount;
+          currentBalance = customer.balance;
         }
 
-        // Writes
-        // 1. Transaction
+        // --- 2. CALCULATIONS ---
+        const finalTransactionAmount = type === 'SALE' ? (formData.bags * formData.pricePerBag) : formData.amount;
+        let newBalance = currentBalance;
+        if (type === 'SALE') {
+          newBalance = currentBalance + finalTransactionAmount - formData.paidNow;
+        } else {
+          newBalance = currentBalance - formData.amount;
+        }
+
+        // --- 3. WRITES ---
+
+        // A. Main Transaction
+        const newTxRef = doc(collection(db, `users/${user.uid}/transactions`));
         const mainTxData: any = {
           customerId: customer.id,
           customerName: customer.name,
           type: type,
-          amount: amount,
+          amount: finalTransactionAmount,
           date: timestamp,
         };
 
@@ -1151,16 +1526,19 @@ function TransactionForm({ type, user, customer, onSuccess, brands }: { type: 'S
           mainTxData.details = {
             brand: formData.brand,
             bags: formData.bags,
-            pricePerBag: formData.pricePerBag
+            pricePerBag: formData.pricePerBag,
+            profit: currentTotalProfit,
+            batchesUsed: batchesUsedRecord // Save tracked usage
           };
+          mainTxData.profit = currentTotalProfit;
         } else {
           mainTxData.details = { notes: formData.notes };
         }
         transaction.set(newTxRef, mainTxData);
 
-        // 2. Partial Payment
+        // B. Partial Payment
         if (type === 'SALE' && formData.paidNow > 0) {
-          const partTxRef = doc(txCol);
+          const partTxRef = doc(collection(db, `users/${user.uid}/transactions`));
           transaction.set(partTxRef, {
             customerId: customer.id,
             customerName: customer.name,
@@ -1171,24 +1549,23 @@ function TransactionForm({ type, user, customer, onSuccess, brands }: { type: 'S
           });
         }
 
-        // 3. Customer Balance
-        const customerRef = doc(db, `users/${user.uid}/customers`, customer.id);
+        // C. Customer Balance
         transaction.update(customerRef, { balance: newBalance });
 
-        // 4. Inventory Update (explicit subtraction)
-        if (type === 'SALE' && inventoryRef) {
-          // Explicitly deducting count
-          transaction.set(inventoryRef, {
-            count: currentStock - formData.bags,
-            lastUpdated: serverTimestamp()
-          }, { merge: true });
+        // D. Inventory Update
+        if (inventoryUpdate && inventoryRef) {
+          transaction.update(inventoryRef, inventoryUpdate);
         }
       });
 
       onSuccess();
-    } catch (err) {
+    } catch (err: any) {
       console.error("Transaction failed:", err);
-      alert("Transaction failed");
+      // Show specific error message
+      const msg = err.message || "Transaction failed";
+      setError(msg);
+      // alert(msg); // Keeping alert as backup or removing if redundant. Let's keep it for now? User said "popup message not working", maybe alert is broken.
+      // Let's rely on UI message primarily.
     } finally {
       setLoading(false);
     }
@@ -1234,6 +1611,25 @@ function TransactionForm({ type, user, customer, onSuccess, brands }: { type: 'S
             </div>
           </div>
 
+          <div className="bg-gray-50 p-3 rounded-xl border border-dashed border-gray-300">
+            <label className="block text-xs font-bold text-gray-500 mb-1">Buying Price (Cost) / Bag</label>
+            <div className="flex items-center gap-2">
+              <span className="text-gray-400">₹</span>
+              <input
+                type="number"
+                value={formData.buyingPrice || ''}
+                onChange={e => setFormData({ ...formData, buyingPrice: Number(e.target.value) })}
+                className="bg-transparent font-mono font-medium text-gray-700 focus:outline-none w-full"
+                placeholder="0"
+              />
+            </div>
+            {formData.buyingPrice > 0 && formData.pricePerBag > 0 && (
+              <p className={`text-xs mt-1 text-right ${totalProfit >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                {totalProfit >= 0 ? 'Profit' : 'Loss'}: ₹{totalProfit}
+              </p>
+            )}
+          </div>
+
           <div className="bg-gray-50 p-4 rounded-xl text-center">
             <p className="text-xs text-gray-500 uppercase">Total Amount</p>
             <p className="text-2xl font-bold text-gray-800">₹ {totalSaleAmount}</p>
@@ -1275,6 +1671,12 @@ function TransactionForm({ type, user, customer, onSuccess, brands }: { type: 'S
         </>
       )}
 
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl text-sm font-medium">
+          {error}
+        </div>
+      )}
+
       <button
         type="submit"
         disabled={loading}
@@ -1292,7 +1694,8 @@ function AddCustomerForm({ user, onCancel, locations, initialData }: { user: Use
   const [formData, setFormData] = useState({
     name: initialData?.name || '',
     phone: initialData?.phone || '',
-    address: initialData?.address || '',
+    // address: initialData?.address || '', // Removed
+    openBalance: 0, // New field for opening balance
     location: (initialData?.location || '') as Location | ''
   });
   const [loading, setLoading] = useState(false);
@@ -1301,22 +1704,41 @@ function AddCustomerForm({ user, onCancel, locations, initialData }: { user: Use
     e.preventDefault();
     if (!formData.location || !formData.name) return;
 
+    console.log("Submitting Customer Form:", formData);
     setLoading(true);
     try {
       if (initialData) {
         // Update existing
         const customerRef = doc(db, `users/${user.uid}/customers`, initialData.id);
         await updateDoc(customerRef, {
-          ...formData,
+          name: formData.name,
+          phone: formData.phone,
+          location: formData.location
           // balance: is unchangeable here
         });
       } else {
         // Create new
-        await addDoc(collection(db, `users/${user.uid}/customers`), {
-          ...formData,
-          balance: 0,
+        const newCustRef = await addDoc(collection(db, `users/${user.uid}/customers`), {
+          name: formData.name,
+          phone: formData.phone,
+          location: formData.location,
+          balance: formData.openBalance || 0, // Use entered opening balance
           createdAt: serverTimestamp()
         });
+
+        // If opening balance given, create a transaction record to match
+        if (formData.openBalance > 0) {
+          await addDoc(collection(db, `users/${user.uid}/transactions`), {
+            type: 'SALE',
+            amount: formData.openBalance,
+            customerId: newCustRef.id,
+            date: serverTimestamp(),
+            details: {
+              isOpeningBalance: true,
+              notes: 'Initial Balance'
+            }
+          });
+        }
       }
       onCancel();
     } catch (err) {
@@ -1386,16 +1808,24 @@ function AddCustomerForm({ user, onCancel, locations, initialData }: { user: Use
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Address (Optional)</label>
-            <textarea
-              className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none"
-              rows={2}
-              value={formData.address}
-              onChange={e => setFormData({ ...formData, address: e.target.value })}
-            />
-          </div>
-
+          {/* Opening Balance Field - Only for NEW customers */}
+          {!initialData && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Initial Opening Balance (Start Debt)</label>
+              <input
+                type="number"
+                placeholder="0"
+                className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none ${formData.openBalance > 0 ? 'border-red-200 bg-red-50 text-red-600 font-bold' : 'border-gray-200'}`}
+                value={formData.openBalance || ''}
+                onChange={e => {
+                  const val = Number(e.target.value);
+                  console.log("Open Balance Changed:", val);
+                  setFormData({ ...formData, openBalance: val });
+                }}
+              />
+              <p className="text-xs text-gray-500 mt-1">Old Udhaar/Debt amount to carry forward.</p>
+            </div>
+          )}
           <button
             type="submit"
             disabled={loading}
@@ -1638,17 +2068,19 @@ function ReportsView({ user }: { user: User }) {
 
 
 
-function BrandManager({ user, onClose }: { user: User, onClose: () => void }) {
+function BrandManager({ user, onClose, onBrandAdded, brandCosts }: { user: User, onClose: () => void, onBrandAdded: (brand: string) => void, brandCosts: Record<string, number> }) {
   const [brands, setBrands] = useState<string[]>([]);
   const [newBrand, setNewBrand] = useState('');
+
   const [loading, setLoading] = useState(true);
+  const [brandToDelete, setBrandToDelete] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, `users/${user.uid}/settings/general`), (docSnap) => {
       if (docSnap.exists() && docSnap.data().brands) {
         setBrands(docSnap.data().brands);
       } else {
-        setBrands(['Sona Masoori', 'Basmati', 'Ponni Rice', 'Idly Rice']);
+        setBrands([]);
       }
       setLoading(false);
     });
@@ -1658,24 +2090,46 @@ function BrandManager({ user, onClose }: { user: User, onClose: () => void }) {
   const addBrand = async () => {
     if (!newBrand.trim()) return;
     try {
+      const brandToAdd = newBrand.trim(); // Capture for callback
       const brandRef = doc(db, `users/${user.uid}/settings/general`);
-      await setDoc(brandRef, {
-        brands: arrayUnion(newBrand.trim())
-      }, { merge: true });
+
+      const updateData: any = {
+        brands: arrayUnion(brandToAdd)
+      };
+
+
+
+      await updateDoc(brandRef, updateData).catch(async (err) => {
+        // Fallback if doc doesn't exist (updateDoc fails)
+        if (err.code === 'not-found') {
+          await setDoc(brandRef, updateData, { merge: true });
+        } else {
+          throw err;
+        }
+      });
+
       setNewBrand('');
+
+      onBrandAdded(brandToAdd); // Notify parent
     } catch (error) {
       console.error("Error adding brand:", error);
       alert("Failed to add brand");
     }
   };
 
-  const removeBrand = async (brand: string) => {
-    if (!confirm(`Delete ${brand}?`)) return;
+  const removeBrand = (brand: string) => {
+    setBrandToDelete(brand);
+  };
+
+  const confirmDelete = async () => {
+    if (!brandToDelete) return;
     try {
       const brandRef = doc(db, `users/${user.uid}/settings/general`);
       await updateDoc(brandRef, {
-        brands: arrayRemove(brand)
+        brands: arrayRemove(brandToDelete),
+        [`brandCosts.${safeBrandKey(brandToDelete)}`]: deleteField()
       });
+      setBrandToDelete(null);
     } catch (error) {
       console.error("Error removing brand:", error);
       alert("Failed to remove brand");
@@ -1694,20 +2148,20 @@ function BrandManager({ user, onClose }: { user: User, onClose: () => void }) {
           </button>
         </div>
 
-        <div className="p-4 border-b border-gray-100">
+        <div className="p-4 border-b border-gray-100 space-y-3">
           <div className="flex gap-2">
             <input
               type="text"
               value={newBrand}
               onChange={(e) => setNewBrand(e.target.value)}
-              placeholder="Enter brand name..."
-              className="flex-1 border border-gray-300 rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              placeholder="Brand Name"
+              className="flex-[3] min-w-0 border border-gray-300 rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-500"
               onKeyDown={(e) => e.key === 'Enter' && addBrand()}
             />
             <button
               onClick={addBrand}
               disabled={!newBrand.trim()}
-              className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold disabled:opacity-50"
+              className="bg-emerald-600 text-white px-4 py-2 rounded-xl font-bold disabled:opacity-50 flex-shrink-0"
             >
               Add
             </button>
@@ -1721,12 +2175,15 @@ function BrandManager({ user, onClose }: { user: User, onClose: () => void }) {
             <div className="space-y-2">
               {brands.map((b, i) => (
                 <div key={i} className="flex justify-between items-center p-3 bg-gray-50 rounded-xl">
-                  <span className="font-medium text-gray-700">{b}</span>
+                  <div>
+                    <span className="font-medium text-gray-700 block">{b}</span>
+                    {brandCosts[safeBrandKey(b)] && <span className="text-xs text-gray-400">Cost: ₹{brandCosts[safeBrandKey(b)]}</span>}
+                  </div>
                   <button
                     onClick={() => removeBrand(b)}
-                    className="text-red-400 hover:text-red-600 p-1 font-bold text-xs uppercase"
+                    className="p-2 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
                   >
-                    Delete
+                    <Trash2 size={18} />
                   </button>
                 </div>
               ))}
@@ -1734,6 +2191,37 @@ function BrandManager({ user, onClose }: { user: User, onClose: () => void }) {
             </div>
           )}
         </div>
+
+        {/* Delete Confirmation Modal */}
+        {brandToDelete && (
+          <div className="absolute inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm animate-in fade-in zoom-in duration-200">
+              <div className="flex flex-col items-center text-center mb-6">
+                <div className="bg-red-100 p-3 rounded-full mb-4">
+                  <Trash2 size={24} className="text-red-600" />
+                </div>
+                <h3 className="text-lg font-bold text-gray-900">Delete Brand?</h3>
+                <p className="text-gray-500 text-sm mt-2">
+                  Are you sure you want to delete <span className="font-bold text-gray-700">{brandToDelete}</span>?
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setBrandToDelete(null)}
+                  className="flex-1 py-2 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 py-2 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 shadow-md shadow-red-200"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1745,13 +2233,14 @@ function LocationManager({ user, onClose }: { user: User, onClose: () => void })
   const [loading, setLoading] = useState(true);
   const [editingLoc, setEditingLoc] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [locationToDelete, setLocationToDelete] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, `users/${user.uid}/settings/general`), (docSnap) => {
       if (docSnap.exists() && docSnap.data().locations) {
         setLocations(docSnap.data().locations);
       } else {
-        setLocations(['Mothepalayam', 'Mettupalayam', 'Sirumugai', 'Karamadai', 'Alangombu', 'Sankar Nagar']);
+        setLocations([]);
       }
       setLoading(false);
     });
@@ -1772,13 +2261,18 @@ function LocationManager({ user, onClose }: { user: User, onClose: () => void })
     }
   };
 
-  const removeLocation = async (loc: string) => {
-    if (!confirm(`Delete ${loc}?`)) return;
+  const removeLocation = (loc: string) => {
+    setLocationToDelete(loc);
+  };
+
+  const confirmDeleteLocation = async () => {
+    if (!locationToDelete) return;
     try {
       const settingsRef = doc(db, `users/${user.uid}/settings/general`);
       await updateDoc(settingsRef, {
-        locations: arrayRemove(loc)
+        locations: arrayRemove(locationToDelete)
       });
+      setLocationToDelete(null);
     } catch (error) {
       console.error("Error removing location:", error);
       alert("Failed to remove location");
@@ -1805,7 +2299,7 @@ function LocationManager({ user, onClose }: { user: User, onClose: () => void })
       batch.update(settingsRef, { locations: newLocations });
 
       // 2. Update all Customers with this location
-      // Note: This might be expensive if there are huge number of customers, 
+      // Note: This might be expensive if there are huge number of customers,
       // but for this app scale (thousands) it's likely okay or we should do it via cloud function.
       // Doing it client side for now.
       const q = query(
@@ -1900,8 +2394,42 @@ function LocationManager({ user, onClose }: { user: User, onClose: () => void })
             </div>
           )}
         </div>
-      </div>
-    </div>
+
+
+        {/* Delete Confirmation Modal */}
+        {
+          locationToDelete && (
+            <div className="absolute inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm animate-in fade-in zoom-in duration-200">
+                <div className="flex flex-col items-center text-center mb-6">
+                  <div className="bg-red-100 p-3 rounded-full mb-4">
+                    <Trash2 size={24} className="text-red-600" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900">Delete Location?</h3>
+                  <p className="text-gray-500 text-sm mt-2">
+                    Are you sure you want to delete <span className="font-bold text-gray-700">{locationToDelete}</span>?
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setLocationToDelete(null)}
+                    className="flex-1 py-2 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmDeleteLocation}
+                    className="flex-1 py-2 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 shadow-md shadow-red-200"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        }
+      </div >
+    </div >
   );
 }
 
@@ -2101,21 +2629,21 @@ const DEFAULT_TEMPLATES: MessageTemplate[] = [
     name: 'Tamil',
     content: `வணக்கம் [வாடிக்கையாளர் பெயர்],
 
-[கடை பெயர்]-யில் உங்களுடைய தற்போதைய நிலுவைத் தொகை [தொகை]. இத்தொகையை விரைவில் செலுத்துமாறு கேட்டுக்கொள்கிறோம்.
+          [கடை பெயர்]-யில் உங்களுடைய தற்போதைய நிலுவைத் தொகை [தொகை]. இத்தொகையை விரைவில் செலுத்துமாறு கேட்டுக்கொள்கிறோம்.
 
-நன்றி. 
-[உரிமையாளர் பெயர்] 
-[உரிமையாளர் அலைபேசி எண்]`
+          நன்றி.
+          [உரிமையாளர் பெயர்]
+          [உரிமையாளர் அலைபேசி எண்]`
   },
   {
     name: 'English',
-    content: `Dear [Customer Name], 
+    content: `Dear [Customer Name],
 
-Your current pending balance at [shop name] is [Pending amount]. Please pay at your earliest convenience. Thank you.
+          Your current pending balance at [shop name] is [Pending amount]. Please pay at your earliest convenience. Thank you.
 
-Regards, 
-[Owner's Name]
-[Owner's Mobile Number]`
+          Regards,
+          [Owner's Name]
+          [Owner's Mobile Number]`
   }
 ];
 
@@ -2235,13 +2763,24 @@ function SendMessageModal({ user, customer, onClose }: { user: User, customer: C
 }
 
 
-function InventoryView({ user }: { user: User }) {
-  const [items, setItems] = useState<{ id: string, count: number, lastUpdated: any }[]>([]);
+function InventoryView({ user, initialAddStockBrand, onClearInitialBrand, brandCosts }: { user: User, initialAddStockBrand?: string | null, onClearInitialBrand?: () => void, brandCosts: Record<string, number> }) {
+  const [items, setItems] = useState<{ id: string, count: number, lastUpdated: any, batches?: Batch[] }[]>([]);
   const [showAddStock, setShowAddStock] = useState(false);
   const [editingItem, setEditingItem] = useState<string | null>(null);
   const [viewingHistoryFor, setViewingHistoryFor] = useState<string | null>(null);
   const [brands, setBrands] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isDeleteMode, setIsDeleteMode] = useState(false);
+  const [itemToDelete, setItemToDelete] = useState<string | null>(null);
+
+  // Auto-open modal if initial brand is set
+  useEffect(() => {
+    if (initialAddStockBrand) {
+      setEditingItem(initialAddStockBrand);
+      setShowAddStock(true);
+      if (onClearInitialBrand) onClearInitialBrand();
+    }
+  }, [initialAddStockBrand, onClearInitialBrand]);
 
   // Fetch Brands
   useEffect(() => {
@@ -2249,7 +2788,7 @@ function InventoryView({ user }: { user: User }) {
       if (docSnap.exists() && docSnap.data().brands) {
         setBrands(docSnap.data().brands);
       } else {
-        setBrands(['Sona Masoori', 'Basmati', 'Ponni Rice', 'Idly Rice']);
+        setBrands([]);
       }
     });
     return () => unsub();
@@ -2266,24 +2805,44 @@ function InventoryView({ user }: { user: User }) {
     return () => unsub();
   }, [user.uid]);
 
+  const confirmDelete = async () => {
+    if (!itemToDelete) return;
+    try {
+      await deleteDoc(doc(db, `users/${user.uid}/inventory`, itemToDelete));
+      setItemToDelete(null);
+    } catch (error) {
+      console.error("Error deleting stock:", error);
+      alert("Failed to delete stock. Please try again.");
+    }
+  };
+
   if (viewingHistoryFor) {
     return <BrandHistory user={user} brand={viewingHistoryFor} onBack={() => setViewingHistoryFor(null)} />;
   }
 
   return (
-    <div className="pb-24">
+    <div className="pb-24 relative">
       <div className="flex justify-between items-center mb-6">
         <div>
           <h2 className="text-xl font-bold text-gray-800">Stock Available</h2>
           <p className="text-sm text-gray-500">Manage your rice bag stacks</p>
         </div>
-        <button
-          onClick={() => setShowAddStock(true)}
-          className="bg-emerald-600 text-white p-3 rounded-xl shadow-sm hover:bg-emerald-700 flex items-center gap-2"
-        >
-          <Plus size={20} />
-          <span className="font-bold text-sm">Update Stock</span>
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setIsDeleteMode(!isDeleteMode)}
+            className={`p-3 rounded-xl shadow-sm flex items-center gap-2 font-bold text-sm ${isDeleteMode ? 'bg-gray-800 text-white hover:bg-gray-900' : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
+          >
+            {isDeleteMode ? <Check size={20} /> : <Trash2 size={20} />}
+            {isDeleteMode ? 'Done' : 'Delete Stack'}
+          </button>
+          <button
+            onClick={() => setShowAddStock(true)}
+            className="bg-emerald-600 text-white p-3 rounded-xl shadow-sm hover:bg-emerald-700 flex items-center gap-2"
+          >
+            <Plus size={20} />
+            <span className="font-bold text-sm">Update Stock</span>
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -2304,22 +2863,34 @@ function InventoryView({ user }: { user: User }) {
           items.map(item => (
             <div
               key={item.id}
-              onClick={() => setViewingHistoryFor(item.id)}
-              className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center cursor-pointer hover:shadow-md transition-shadow active:bg-gray-50"
+              onClick={() => !isDeleteMode && setViewingHistoryFor(item.id)}
+              className={`bg-white p-5 rounded-2xl shadow-sm border border-gray-100 flex justify-between items-center transition-shadow ${!isDeleteMode ? 'cursor-pointer hover:shadow-md active:bg-gray-50' : ''}`}
             >
               <div>
                 <div className="flex items-center gap-2">
                   <h3 className="font-bold text-gray-800 text-lg">{item.id}</h3>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setEditingItem(item.id);
-                      setShowAddStock(true);
-                    }}
-                    className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-colors"
-                  >
-                    <Pencil size={16} />
-                  </button>
+                  {isDeleteMode ? (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setItemToDelete(item.id);
+                      }}
+                      className="p-1.5 text-white bg-red-500 hover:bg-red-600 rounded-full transition-colors shadow-sm"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingItem(item.id);
+                        setShowAddStock(true);
+                      }}
+                      className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-colors"
+                    >
+                      <Pencil size={16} />
+                    </button>
+                  )}
                 </div>
                 <p className="text-xs text-gray-400">
                   Last updated: {item.lastUpdated?.toDate ? item.lastUpdated.toDate().toLocaleDateString() : 'Just now'}
@@ -2329,6 +2900,11 @@ function InventoryView({ user }: { user: User }) {
                 <p className="text-xs text-gray-400 uppercase font-bold mb-1">Available</p>
                 <div className={`text-3xl font-black ${item.count < 10 ? 'text-red-500' : 'text-emerald-600'}`}>
                   {item.count} <span className="text-sm font-medium text-gray-400">bags</span>
+                  {item.batches && item.batches.length > 0 && (
+                    <span className="text-xs text-gray-400 block mt-1">
+                      {item.batches.length} Batches
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -2337,7 +2913,7 @@ function InventoryView({ user }: { user: User }) {
       </div>
 
       {showAddStock && (
-        <AddStockModal
+        <UpdateStockModal
           user={user}
           brands={brands}
           currentItems={items}
@@ -2347,7 +2923,39 @@ function InventoryView({ user }: { user: User }) {
           }}
           initialBrand={editingItem}
           initialAction={editingItem ? 'SET' : 'ADD'}
+          brandCosts={brandCosts}
         />
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {itemToDelete && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-6 animate-in fade-in">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl scale-100 animate-in zoom-in-95">
+            <div className="flex flex-col items-center text-center mb-6">
+              <div className="bg-red-100 p-3 rounded-full mb-4">
+                <Trash2 size={32} className="text-red-600" />
+              </div>
+              <h3 className="text-xl font-bold text-gray-900">Delete {itemToDelete}?</h3>
+              <p className="text-gray-500 text-sm mt-2">
+                Are you sure you want to delete this stock stack? This action cannot be undone.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setItemToDelete(null)}
+                className="flex-1 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition-colors shadow-md shadow-red-200"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -2355,23 +2963,50 @@ function InventoryView({ user }: { user: User }) {
 
 function BrandHistory({ user, brand, onBack }: { user: User, brand: string, onBack: () => void }) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
+  const [batchToDelete, setBatchToDelete] = useState<Batch | null>(null);
 
   useEffect(() => {
-    const q = query(
+    // 1. Fetch Sales History
+    const qTx = query(
       collection(db, `users/${user.uid}/transactions`),
       where('type', '==', 'SALE'),
       orderBy('date', 'desc')
     );
 
-    const unsub = onSnapshot(q, (snap) => {
+    const unsubTx = onSnapshot(qTx, (snap) => {
       const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Transaction[];
       const brandTx = data.filter(t => t.details?.brand === brand);
       setTransactions(brandTx);
+    }, (error) => {
+      console.error("Error fetching transactions (likely missing index):", error);
+    });
+
+    // 2. Fetch Inventory Batches
+    const inventoryRef = doc(db, `users/${user.uid}/inventory`, brand);
+    const unsubInv = onSnapshot(inventoryRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.batches && Array.isArray(data.batches)) {
+          // Sort by date ascending for FIFO
+          const sortedBatches = [...data.batches].sort((a, b) => {
+            const dateA = a.date?.toDate ? a.date.toDate() : new Date(0);
+            const dateB = b.date?.toDate ? b.date.toDate() : new Date(0);
+            return dateA.getTime() - dateB.getTime();
+          });
+          setBatches(sortedBatches);
+        } else {
+          setBatches([]);
+        }
+      }
       setLoading(false);
     });
 
-    return () => unsub();
+    return () => {
+      unsubTx();
+      unsubInv();
+    };
   }, [user.uid, brand]);
 
   return (
@@ -2381,52 +3016,207 @@ function BrandHistory({ user, brand, onBack }: { user: User, brand: string, onBa
           <ArrowLeft size={24} />
         </button>
         <div>
-          <h2 className="text-xl font-bold text-gray-800">{brand} History</h2>
-          <p className="text-sm text-gray-500">Sales record</p>
+          <h2 className="text-xl font-bold text-gray-800">{brand} Details</h2>
+          <p className="text-sm text-gray-500">Batches & Sales History</p>
         </div>
       </div>
 
-      <div className="space-y-3">
-        {loading ? (
-          <p className="text-center text-gray-400 py-10">Loading history...</p>
-        ) : transactions.length === 0 ? (
-          <div className="text-center py-10 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-            <ShoppingBag size={48} className="mx-auto text-gray-300 mb-2" />
-            <p className="text-gray-500 font-medium">No sales found for this brand.</p>
-          </div>
-        ) : (
-          transactions.map(t => (
-            <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-center">
-              <div>
-                <p className="font-bold text-gray-800">{t.customerName}</p>
-                <div className="text-xs text-gray-500 mt-1">
-                  {t.date?.toDate ? (
-                    <>
-                      <div className="flex gap-4 mb-1">
-                        <span><span className="font-semibold text-gray-600">Date:</span> {format(t.date.toDate(), 'dd/MM/yyyy')}</span>
-                        <span><span className="font-semibold text-gray-600">Time:</span> {format(t.date.toDate(), 'hh:mm a')}</span>
-                      </div>
-                      <div>
-                        <span className="font-semibold text-gray-600">Info:</span> {t.details?.bags} bags @ ₹{t.details?.pricePerBag}
-                      </div>
-                    </>
-                  ) : ''}
+      {/* Batches Section */}
+      <div className="mb-8">
+        <h3 className="text-gray-800 font-bold mb-3 text-sm uppercase tracking-wide opacity-70">Current Batches (FIFO)</h3>
+        <div className="space-y-3">
+          {loading ? (
+            <div className="p-4 bg-gray-50 rounded-xl animate-pulse h-20"></div>
+          ) : batches.length === 0 ? (
+            <div className="p-6 text-center bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400 text-sm">
+              No active batches found.
+            </div>
+          ) : (
+            batches.map((batch, index) => (
+              <div key={index} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-3">
+                <div className="flex divide-x divide-gray-100">
+                  {/* Batch No */}
+                  <div className="flex-1 p-3 text-center flex flex-col justify-center">
+                    <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">Batch</p>
+                    <p className="font-bold text-gray-700">{index + 1}</p>
+                  </div>
+
+                  {/* Date */}
+                  <div className="flex-[1.5] p-3 text-center flex flex-col justify-center">
+                    <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">Date</p>
+                    <p className="text-sm font-bold text-gray-700">
+                      {batch.date?.toDate ? format(batch.date.toDate(), 'dd/MM/yy') : '-'}
+                    </p>
+                  </div>
+
+                  {/* Bags */}
+                  <div className="flex-1 p-3 text-center bg-emerald-50/30 flex flex-col justify-center">
+                    <p className="text-[10px] text-emerald-600/70 uppercase font-bold mb-1">Stock</p>
+                    <p className="font-bold text-emerald-700 text-lg">
+                      {batch.count}
+                      {batch.initialCount ? <span className="text-xs text-emerald-500 font-medium opacity-70">/{batch.initialCount}</span> : ''}
+                    </p>
+                  </div>
+
+                  {/* Cost */}
+                  <div className="flex-[1.2] p-3 text-center flex flex-col justify-center">
+                    <p className="text-[10px] text-gray-400 uppercase font-bold mb-1">Cost</p>
+                    <p className="font-bold text-gray-700">₹{batch.cost}</p>
+                  </div>
+
+                  {/* Delete Action */}
+                  <div className="flex-[0.8] bg-red-50 flex items-center justify-center">
+                    <button
+                      onClick={() => setBatchToDelete(batch)}
+                      className="p-2 text-red-500 hover:bg-red-100 rounded-full transition-colors"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
                 </div>
               </div>
-              <p className="font-bold text-emerald-600">+ ₹{t.amount}</p>
-            </div>
-          ))
-        )}
+            ))
+          )}
+        </div>
       </div>
+
+      {/* Sales History Section */}
+      <div>
+        <h3 className="text-gray-800 font-bold mb-3 text-sm uppercase tracking-wide opacity-70">Recent Sales</h3>
+        <div className="space-y-3">
+          {loading ? (
+            <div className="p-4 bg-gray-50 rounded-xl animate-pulse h-20"></div>
+          ) : transactions.length === 0 ? (
+            <div className="text-center py-10 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+              <ShoppingBag size={48} className="mx-auto text-gray-300 mb-2" />
+              <p className="text-gray-500 font-medium">No sales found for this brand.</p>
+            </div>
+          ) : (
+            transactions.map(t => (
+              <div key={t.id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-center">
+                <div>
+                  <p className="font-bold text-gray-800">{t.customerName}</p>
+                  <div className="text-xs text-gray-500 mt-1">
+                    {t.date?.toDate ? (
+                      <>
+                        <div className="flex gap-4 mb-1">
+                          <span><span className="font-semibold text-gray-600">Date:</span> {format(t.date.toDate(), 'dd/MM/yyyy')}</span>
+                        </div>
+                        <div>
+                          <span className="font-semibold text-gray-600">Info:</span> {t.details?.bags} bags @ ₹{t.details?.pricePerBag}
+                        </div>
+                      </>
+                    ) : ''}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="font-bold text-emerald-600">+ ₹{t.amount}</p>
+                  {t.details?.profit !== undefined && (
+                    <p className="text-xs text-gray-400 mt-1">Profit: ₹{t.details.profit}</p>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Batch Delete Confirmation Modal */}
+      {batchToDelete && (
+        <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-6 animate-in fade-in">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl scale-100 animate-in zoom-in-95">
+            <div className="flex flex-col items-center text-center mb-6">
+              <div className="bg-red-100 p-3 rounded-full mb-4">
+                <Trash2 size={32} className="text-red-600" />
+              </div>
+              <h3 className="text-xl font-bold text-gray-900">Delete Batch?</h3>
+              <p className="text-gray-500 text-sm mt-2">
+                Delete batch with <span className="font-bold text-gray-800">{batchToDelete.count} bags</span>?
+              </p>
+              <p className="text-xs text-red-500 mt-2 bg-red-50 px-3 py-1 rounded-full">
+                This will reduce your total stock by {batchToDelete.count}.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setBatchToDelete(null)}
+                className="flex-1 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  if (!batchToDelete) return;
+                  try {
+                    const ref = doc(db, `users/${user.uid}/inventory`, brand);
+
+                    await runTransaction(db, async (transaction) => {
+                      const sfDoc = await transaction.get(ref);
+                      if (!sfDoc.exists()) return;
+
+                      const data = sfDoc.data();
+                      const currentBatches = (data.batches || []) as Batch[];
+                      const batchInDb = currentBatches.find(b => b.id === batchToDelete.id);
+
+                      if (batchInDb) {
+                        // Filter and SANITIZE batches (remove undefined fields which crash Firestore)
+                        const updatedBatches = currentBatches
+                          .filter(b => b.id !== batchToDelete.id)
+                          .map(b => {
+                            const cleanBatch: any = {
+                              id: b.id,
+                              count: b.count,
+                              cost: b.cost,
+                              date: b.date
+                            };
+                            if (b.initialCount !== undefined && b.initialCount !== null) {
+                              cleanBatch.initialCount = b.initialCount;
+                            }
+                            return cleanBatch;
+                          });
+
+                        const newCount = typeof data.count === 'number' ? data.count - batchInDb.count : 0;
+
+                        transaction.set(ref, {
+                          ...data,
+                          count: newCount < 0 ? 0 : newCount,
+                          batches: updatedBatches,
+                          lastUpdated: serverTimestamp()
+                        });
+                      }
+                    });
+
+                    setBatchToDelete(null); // Close modal on success
+                  } catch (e) {
+                    console.error("Error deleting batch:", e);
+                    alert("Failed to delete batch: " + (e as any).message);
+                  }
+                }}
+                className="flex-1 py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition-colors shadow-md shadow-red-200"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div >
   );
 }
 
-function AddStockModal({ user, brands, onClose, currentItems, initialBrand, initialAction }: { user: User, brands: string[], onClose: () => void, currentItems: any[], initialBrand?: string | null, initialAction?: 'ADD' | 'SET' }) {
-  const [selectedBrand, setSelectedBrand] = useState(initialBrand || brands[0] || '');
+function UpdateStockModal({ user, brands, onClose, currentItems, initialBrand, initialAction, brandCosts }: { user: User, brands: string[], onClose: () => void, currentItems: any[], initialBrand?: string | null, initialAction?: 'ADD' | 'SET', brandCosts: Record<string, number> }) {
+  const [selectedBrand, setSelectedBrand] = useState(initialBrand || '');
   const [action, setAction] = useState<'ADD' | 'SET'>(initialAction || 'ADD');
   const [quantity, setQuantity] = useState<number | ''>('');
+  const [cost, setCost] = useState<number>(0);
   const [loading, setLoading] = useState(false);
+
+  // Auto-fill cost from settings
+  useEffect(() => {
+    if (selectedBrand && brandCosts) {
+      setCost(brandCosts[safeBrandKey(selectedBrand)] || 0);
+    }
+  }, [selectedBrand, brandCosts]);
 
   // Ensure the valid options include the initialBrand even if not in the global list (e.g. deleted but has stock)
   const effectiveBrands = useMemo(() => {
@@ -2444,20 +3234,45 @@ function AddStockModal({ user, brands, onClose, currentItems, initialBrand, init
 
     try {
       const ref = doc(db, `users/${user.uid}/inventory`, selectedBrand);
-      let newCount = 0;
 
-      if (action === 'SET') {
-        newCount = Number(quantity);
-      } else {
-        newCount = currentCount + Number(quantity);
+      if (action === 'ADD') {
+        // No need for newCount variable here, direct increment is used below
       }
 
-      await setDoc(ref, {
-        count: newCount,
-        lastUpdated: serverTimestamp()
-      }, { merge: true });
+      // Create New Batch
+      const newBatch: Batch = {
+        id: Date.now().toString(), // Simple ID
+        count: Number(quantity), // This is the quantity of the new batch
+        initialCount: Number(quantity), // Track initial size
+        cost: cost,
+        date: Timestamp.now()
+      };
 
-      onClose();
+      // We need to fetch existing to append to batch array, or use arrayUnion
+      // Ideally we strictly use arrayUnion but we also update 'count' aggregate
+      // Let's do a transaction-like update or just updateDoc
+      try {
+        await updateDoc(ref, {
+          count: increment(Number(quantity)), // Increment total count by the added quantity
+          lastUpdated: serverTimestamp(),
+          batches: arrayUnion(newBatch)
+        });
+        onClose();
+        //  alert("Stock updated!");
+      } catch (e: any) {
+        // If doc doesn't exist, set it
+        if (e.code === 'not-found') {
+          await setDoc(ref, {
+            count: Number(quantity),
+            lastUpdated: serverTimestamp(),
+            batches: [newBatch]
+          });
+          onClose();
+        } else {
+          throw e;
+        }
+      }
+
     } catch (e) {
       console.error(e);
       alert("Failed to update stock");
@@ -2484,6 +3299,7 @@ function AddStockModal({ user, brands, onClose, currentItems, initialBrand, init
               onChange={e => setSelectedBrand(e.target.value)}
               className="w-full p-3 border border-gray-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
             >
+              <option value="" disabled>Select a brand</option>
               {effectiveBrands.map(b => (
                 <option key={b} value={b}>{b}</option>
               ))}
@@ -2524,6 +3340,24 @@ function AddStockModal({ user, brands, onClose, currentItems, initialBrand, init
               autoFocus
             />
           </div>
+
+          {action === 'ADD' && (
+            <div>
+              <label className="block text-sm font-bold text-gray-700 mb-2">
+                Purchased Price / Bag
+              </label>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-400 font-bold text-xl">₹</span>
+                <input
+                  type="number"
+                  min="0"
+                  value={cost}
+                  onChange={e => setCost(Number(e.target.value))}
+                  className="w-full p-4 text-center text-2xl font-bold border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+          )}
 
           <button
             onClick={handleUpdate}
